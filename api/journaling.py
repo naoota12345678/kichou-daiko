@@ -37,10 +37,16 @@ def _build_pattern_text(patterns: list[JournalPattern]) -> str:
     return "\n".join(lines)
 
 
-def judge_stage1(receipt: ReceiptData, patterns: list[JournalPattern]) -> JournalEntry:
+def judge_stage1(receipt: ReceiptData, patterns: list[JournalPattern], rules: list[str] | None = None) -> JournalEntry:
     """Haiku一次判断: OCRテキスト + パターンマスタから仕訳を生成"""
 
     pattern_text = _build_pattern_text(patterns)
+
+    rules_text = ""
+    if rules:
+        rules_text = "\n■ この顧問先の追加仕訳ルール（必ず従ってください）:\n"
+        for i, rule in enumerate(rules, 1):
+            rules_text += f"{i}. {rule}\n"
 
     prompt = f"""あなたは記帳代行の仕訳担当です。以下のレシート情報から仕訳を作成してください。
 
@@ -58,7 +64,7 @@ def judge_stage1(receipt: ReceiptData, patterns: list[JournalPattern]) -> Journa
 
 ■ 仕訳パターンマスタ（この中から最も適切なものを選んでください）:
 {pattern_text}
-
+{rules_text}
 ■ ルール:
 1. パターンマスタのキーワードと取引先名・品目を照合し、最適な仕訳パターンを選ぶ
 2. 取引先名のゆらぎを吸収する（例: ツルハドラッグ/ツルハ/TSURUHA → 同じ取引先）
@@ -201,11 +207,12 @@ JSONのみ返してください。"""
 def process_receipt(
     receipt: ReceiptData,
     patterns: list[JournalPattern],
+    rules: list[str] | None = None,
 ) -> JournalEntry:
     """レシート→仕訳 の2段階処理パイプライン"""
 
     # Stage 1: Haiku
-    entry = judge_stage1(receipt, patterns)
+    entry = judge_stage1(receipt, patterns, rules)
 
     # Stage 2: confidence=low ならOpusで再判定（現在テスト中：Haikuのみで運用）
     # if entry.confidence == "low":

@@ -183,6 +183,66 @@ def delete_pattern(client_id: str, pattern_id: str, authorization: str = Header(
     return {"ok": True}
 
 
+# ---- 仕訳ルール管理 ----
+
+class RuleCreate(BaseModel):
+    text: str
+
+
+@app.get("/api/clients/{client_id}/rules")
+def list_rules(client_id: str, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("rules")
+        .order_by("createdAt")
+        .stream()
+    )
+    rules = []
+    for doc in docs:
+        d = doc.to_dict()
+        d["id"] = doc.id
+        rules.append(d)
+    return {"rules": rules}
+
+
+@app.post("/api/clients/{client_id}/rules")
+def create_rule(client_id: str, req: RuleCreate, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    if not req.text.strip():
+        raise HTTPException(400, "ルールのテキストを入力してください")
+
+    ref = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("rules").document()
+    )
+    ref.set({
+        "text": req.text.strip(),
+        "createdAt": firestore.SERVER_TIMESTAMP,
+    })
+    return {"id": ref.id, "text": req.text.strip()}
+
+
+@app.delete("/api/clients/{client_id}/rules/{rule_id}")
+def delete_rule(client_id: str, rule_id: str, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("rules").document(rule_id)
+        .delete()
+    )
+    return {"ok": True}
+
+
 # ---- レシートアップロード & 仕訳 ----
 
 def _load_patterns(office_id: str, client_id: str) -> list[JournalPattern]:
@@ -208,6 +268,18 @@ def _load_patterns(office_id: str, client_id: str) -> list[JournalPattern]:
             description_template=d.get("descriptionTemplate", ""),
         ))
     return patterns
+
+
+def _load_rules(office_id: str, client_id: str) -> list[str]:
+    """Firestoreからクライアントの仕訳ルールを読み込み"""
+    docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("rules")
+        .order_by("createdAt")
+        .stream()
+    )
+    return [doc.to_dict().get("text", "") for doc in docs]
 
 
 def _ocr_image(image_bytes: bytes) -> str:
@@ -301,11 +373,12 @@ async def process_receipt_upload(
     receipt = _extract_receipt_info(ocr_text)
     print(f"[抽出] {receipt.vendor} ¥{receipt.amount} {receipt.payment_method}")
 
-    # 3. 仕訳パターン読み込み
+    # 3. 仕訳パターン & ルール読み込み
     patterns = _load_patterns(office_id, client_id)
+    rules = _load_rules(office_id, client_id)
 
     # 4. 仕訳判定（Haiku → 必要ならOpus）
-    entry = process_receipt(receipt, patterns)
+    entry = process_receipt(receipt, patterns, rules)
     print(f"[仕訳] {entry.debit_account} / {entry.credit_account} confidence={entry.confidence}")
 
     # 5. Google Driveに画像保存

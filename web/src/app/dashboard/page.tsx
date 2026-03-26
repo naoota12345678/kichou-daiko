@@ -83,6 +83,20 @@ export default function DashboardPage() {
                 </Link>
               </CardContent>
             </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">仕訳ルール</CardTitle>
+                <CardDescription>
+                  顧問先ごとの仕訳ルールを管理
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Link href="/rules">
+                  <Button variant="outline" className="w-full">ルール管理</Button>
+                </Link>
+              </CardContent>
+            </Card>
           </div>
         )}
       </main>
