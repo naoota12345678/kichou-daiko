@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 320px;
+      padding: 16px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 14px;
+      color: #333;
+    }
+    h1 {
+      font-size: 16px;
+      margin: 0 0 12px 0;
+    }
+    .site {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .site-name {
+      font-weight: 500;
+    }
+    .status {
+      font-size: 12px;
+      color: #999;
+    }
+    .status.ok {
+      color: #16a34a;
+    }
+    .status.error {
+      color: #dc2626;
+    }
+    button {
+      background: #111;
+      color: #fff;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover {
+      background: #333;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    #send-all {
+      width: 100%;
+      margin-top: 12px;
+      padding: 10px;
+      font-size: 14px;
+    }
+    #message {
+      margin-top: 8px;
+      font-size: 12px;
+      text-align: center;
+    }
+    .login-link {
+      font-size: 12px;
+      color: #666;
+      margin-top: 8px;
+      text-align: center;
+    }
+    .login-link a {
+      color: #2563eb;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>電帳ツール</h1>
+
+  <div class="site">
+    <span class="site-name">Amazon</span>
+    <span id="status-amazon" class="status">未確認</span>
+  </div>
+  <div class="site">
+    <span class="site-name">楽天市場</span>
+    <span id="status-rakuten" class="status">未確認</span>
+  </div>
+  <div class="site">
+    <span class="site-name">Yahoo</span>
+    <span id="status-yahoo" class="status">未確認</span>
+  </div>
+
+  <button id="send-all">セッションを送信</button>
+  <div id="message"></div>
+
+  <div class="login-link">
+    <a href="https://dentyo.romu.ai" target="_blank">電帳ツールを開く</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "acc-tool"
+version = "0.1.0"
+description = "経理半自動化CLIツール - EC取引データ集約＋仕訳CSV自動生成"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.9",
+    "pandas>=2.0",
+    "google-api-python-client>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "playwright>=1.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+acc = "acc_tool.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/acc_tool"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

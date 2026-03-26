@@ -1,0 +1,18 @@
+{
+  "name": "dentyo - 電子帳簿保存法対応 経理自動化",
+  "short_name": "dentyo",
+  "description": "領収書のアップロード・整理・仕訳CSV出力を自動化",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

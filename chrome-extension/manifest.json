@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "電帳ツール - ECセッション取得",
+  "version": "1.0.0",
+  "description": "Amazon・楽天・Yahooのセッションを電帳ツールに送信します",
+  "permissions": ["cookies", "activeTab"],
+  "host_permissions": [
+    "https://*.amazon.co.jp/*",
+    "https://*.rakuten.co.jp/*",
+    "https://*.yahoo.co.jp/*",
+    "https://dentyo.romu.ai/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://dentyo.romu.ai/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

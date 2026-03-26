@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+.venv/
+.ruff_cache/
+.pytest_cache/
+debug_html/
+receipts/
+*.csv
+login_done.txt
+
+.vercel
+.claude/settings.local.json
