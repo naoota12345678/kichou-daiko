@@ -34,3 +34,4 @@ export function getClientDb(): Firestore {
 }
 
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: "select_account" });

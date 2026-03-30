@@ -24,10 +24,14 @@ class JournalEntry:
     debit_code: str = ""
     debit_amount: int = 0
     debit_tax_category: str = ""
+    debit_sub_code: str = ""
+    debit_sub_name: str = ""
     credit_account: str = ""
     credit_code: str = ""
     credit_amount: int = 0
     credit_tax_category: str = ""
+    credit_sub_code: str = ""
+    credit_sub_name: str = ""
     tax_rate: str = "10"
     description: str = ""
     vendor: str = ""

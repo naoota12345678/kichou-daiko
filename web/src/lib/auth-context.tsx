@@ -9,17 +9,17 @@ import {
 } from "react";
 import {
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   type User,
 } from "firebase/auth";
-import { getClientAuth, googleProvider } from "@/lib/firebase/client";
+import { getClientAuth } from "@/lib/firebase/client";
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
   error: string | null;
-  signInWithGoogle: () => Promise<void>;
+  signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -27,7 +27,7 @@ const AuthContext = createContext<AuthContextType>({
   user: null,
   loading: true,
   error: null,
-  signInWithGoogle: async () => {},
+  signIn: async () => {},
   signOut: async () => {},
 });
 
@@ -45,13 +45,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return unsubscribe;
   }, []);
 
-  const signInWithGoogle = async () => {
+  const signIn = async (email: string, password: string) => {
     const auth = getClientAuth();
+    setError(null);
     try {
-      await signInWithPopup(auth, googleProvider);
+      await signInWithEmailAndPassword(auth, email, password);
     } catch (e: any) {
-      console.error("[Auth] signInWithPopup error:", e.code, e.message);
-      setError(`ログインエラー: ${e.code} - ${e.message}`);
+      console.error("[Auth] signIn error:", e.code, e.message);
+      if (e.code === "auth/invalid-credential" || e.code === "auth/wrong-password" || e.code === "auth/user-not-found") {
+        setError("メールアドレスまたはパスワードが正しくありません");
+      } else {
+        setError(`ログインエラー: ${e.code}`);
+      }
     }
   };
 
@@ -61,7 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signInWithGoogle, signOut, error }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signOut, error }}>
       {children}
     </AuthContext.Provider>
   );

@@ -433,7 +433,10 @@ def _extract_receipt_info(ocr_text: str, is_handwritten: bool = False, image_byt
 ■ 抽出ルール:
 - vendor: 店名・会社名。一般的に通じる名称にする
 - amount: 税込合計金額（「お預かり」「お釣り」は絶対に読まない）
-- date: YYYY-MM-DD形式。現在{current_year}年前後
+- date: YYYY-MM-DD形式。現在{current_year}年（令和{current_year - 2018}年）前後
+  - 和暦変換: 令和元年=2019, 令和2年=2020, ... 令和7年=2025, 令和8年=2026
+  - 手書きで「R7」「R.7」「令7」等は令和7年=2025年
+  - 年が不明・読めない場合は{current_year}年とする
 - invoiceNumber: T+13桁の登録番号。なければ空文字
 - paymentMethod: "現金" or "カード"
   - クレジット/VISA/JCB/電子マネー/PayPay/Suica等 → "カード"
@@ -502,7 +505,9 @@ JSONのみ返してください。""",
 ■ 抽出ルール:
 - vendor: 店名・会社名
 - amount: 税込合計金額（数値のみ）
-- date: YYYY-MM-DD形式。現在{current_year}年前後
+- date: YYYY-MM-DD形式。現在{current_year}年（令和{current_year - 2018}年）前後
+  - 和暦変換: 令和7年=2025, 令和8年=2026。「R7」「令7」等も同様
+  - 年が不明なら{current_year}年とする
 - invoiceNumber: T+13桁の登録番号。なければ空文字
 - paymentMethod: "現金" or "カード"
 - items: 主な品目名（最大5個）
@@ -687,22 +692,54 @@ def process_all_uploaded(
                 print(f"[得意先マッチ] 部分一致: {entry.vendor} → {cname} (補助:{c.get('code','')})")
                 return {"name": cname, "code": c.get("code", "")}
 
-        # 3. あいまいマッチ（共通文字数が7割以上）
+        # 3. あいまいマッチ（共通文字数が7割以上、双方向で判定）
         for c in cust_list:
             cname = c.get("name", "")
             if not cname or len(cname) < 2:
                 continue
             cname_norm = normalize(cname)
-            if not vendor_norm:
+            if not vendor_norm or not cname_norm:
                 continue
-            common = sum(1 for ch in cname_norm if ch in vendor_norm)
-            ratio = common / max(len(cname_norm), 1)
+            # マスタ名→vendor方向
+            common1 = sum(1 for ch in cname_norm if ch in vendor_norm)
+            ratio1 = common1 / max(len(cname_norm), 1)
+            # vendor→マスタ名方向
+            common2 = sum(1 for ch in vendor_norm if ch in cname_norm)
+            ratio2 = common2 / max(len(vendor_norm), 1)
+            # どちらか高い方を採用
+            ratio = max(ratio1, ratio2)
             if ratio >= 0.7:
                 print(f"[得意先マッチ] あいまい({ratio:.0%}): {entry.vendor} → {cname} (補助:{c.get('code','')})")
                 return {"name": cname, "code": c.get("code", "")}
 
         print(f"[得意先マッチ] マッチなし: debit_code={entry.debit_code}, vendor={entry.vendor}")
         return None
+
+    def _apply_customer_match(entry: JournalEntry, matched: dict | None, cust_list: list):
+        """得意先マッチ結果を仕訳の補助科目に反映（売掛金がある側に設定）"""
+        if matched:
+            name = matched["name"]
+            code = matched.get("code", "")
+            entry.description = name
+            # 売掛金がどちら側にあるかを判定して補助を設定
+            if "売掛" in entry.debit_account:
+                entry.debit_sub_code = code
+                entry.debit_sub_name = name
+            elif "売掛" in entry.credit_account:
+                entry.credit_sub_code = code
+                entry.credit_sub_name = name
+            else:
+                # 売掛金がない場合は借方に設定
+                entry.debit_sub_code = code
+                entry.debit_sub_name = name
+        elif cust_list:
+            entry.description = entry.vendor or "その他"
+            if "売掛" in entry.debit_account:
+                entry.debit_sub_code = "その他"
+                entry.debit_sub_name = "その他"
+            elif "売掛" in entry.credit_account:
+                entry.credit_sub_code = "その他"
+                entry.credit_sub_name = "その他"
 
     if customers:
         customer_lines = ["""■ 得意先マスタ（重要！必ず以下のルールに従ってください）:
@@ -798,27 +835,11 @@ def process_all_uploaded(
                         items=receipt.items, ocr_text=receipt.ocr_text,
                     )
                     entry = process_receipt(sub_receipt, patterns, effective_rules)
-                    # 得意先マッチ → 摘要と補助コードを設定
-                    matched = _match_customer(entry, code_to_name, customers)
-                    if matched:
-                        entry.description = matched["name"]
-                        if matched["code"]:
-                            entry.debit_code = matched["code"]
-                    elif customers:
-                        entry.description = entry.vendor or "その他"
-                        entry.debit_code = "その他"
+                    _apply_customer_match(entry, _match_customer(entry, code_to_name, customers), customers)
                     entries_to_save.append((sub_receipt, entry, tb_rate))
             else:
                 entry = process_receipt(receipt, patterns, effective_rules)
-                # 得意先マッチ → 摘要と補助コードを設定
-                matched = _match_customer(entry, code_to_name, customers)
-                if matched:
-                    entry.description = matched["name"]
-                    if matched["code"]:
-                        entry.debit_code = matched["code"]
-                elif customers:
-                    entry.description = entry.vendor or "その他"
-                    entry.debit_code = "その他"
+                _apply_customer_match(entry, _match_customer(entry, code_to_name, customers), customers)
                 entries_to_save.append((receipt, entry, receipt.tax_rate))
 
             # 元のドキュメントを更新（最初の仕訳）
@@ -837,10 +858,14 @@ def process_all_uploaded(
                     "debitCode": first_entry.debit_code,
                     "debitAmount": first_entry.debit_amount,
                     "debitTaxCategory": first_entry.debit_tax_category,
+                    "debitSubCode": first_entry.debit_sub_code,
+                    "debitSubName": first_entry.debit_sub_name,
                     "creditAccount": first_entry.credit_account,
                     "creditCode": first_entry.credit_code,
                     "creditAmount": first_entry.credit_amount,
                     "creditTaxCategory": first_entry.credit_tax_category,
+                    "creditSubCode": first_entry.credit_sub_code,
+                    "creditSubName": first_entry.credit_sub_name,
                     "taxRate": first_entry.tax_rate,
                     "description": first_entry.description,
                     "vendor": first_entry.vendor,
@@ -873,10 +898,14 @@ def process_all_uploaded(
                         "debitCode": entry.debit_code,
                         "debitAmount": entry.debit_amount,
                         "debitTaxCategory": entry.debit_tax_category,
+                        "debitSubCode": entry.debit_sub_code,
+                        "debitSubName": entry.debit_sub_name,
                         "creditAccount": entry.credit_account,
                         "creditCode": entry.credit_code,
                         "creditAmount": entry.credit_amount,
                         "creditTaxCategory": entry.credit_tax_category,
+                        "creditSubCode": entry.credit_sub_code,
+                        "creditSubName": entry.credit_sub_name,
                         "taxRate": entry.tax_rate,
                         "description": entry.description,
                         "vendor": entry.vendor,
@@ -1225,6 +1254,32 @@ def delete_receipt(
     return {"ok": True}
 
 
+@app.delete("/api/clients/{client_id}/receipts/errors")
+def delete_error_receipts(
+    client_id: str,
+    authorization: str = Header(...),
+):
+    """仕訳データがないレシート（エラー分）を一括削除"""
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    receipts = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("receipts").stream()
+    )
+
+    deleted = 0
+    for doc in receipts:
+        d = doc.to_dict()
+        journal = d.get("journal")
+        if not journal or not journal.get("debitAccount"):
+            doc.reference.delete()
+            deleted += 1
+
+    return {"ok": True, "deleted": deleted}
+
+
 # ---- CSVエクスポート ----
 
 @app.get("/api/clients/{client_id}/export")
@@ -1245,6 +1300,7 @@ def export_csv(
         db.collection("offices").document(office_id)
         .collection("clients").document(client_id)
         .collection("receipts")
+        .order_by("createdAt")
     )
 
     if status != "all":
@@ -1280,10 +1336,14 @@ def export_csv(
             debit_code=j.get("debitCode", ""),
             debit_amount=j.get("debitAmount", d.get("amount", 0)),
             debit_tax_category=j.get("debitTaxCategory", ""),
+            debit_sub_code=j.get("debitSubCode", ""),
+            debit_sub_name=j.get("debitSubName", ""),
             credit_account=j.get("creditAccount", ""),
             credit_code=j.get("creditCode", ""),
             credit_amount=j.get("creditAmount", d.get("amount", 0)),
             credit_tax_category=j.get("creditTaxCategory", ""),
+            credit_sub_code=j.get("creditSubCode", ""),
+            credit_sub_name=j.get("creditSubName", ""),
             tax_rate=j.get("taxRate", "10"),
             description=j.get("description", ""),
             vendor=j.get("vendor", d.get("vendor", "")),
@@ -1291,18 +1351,38 @@ def export_csv(
             reasoning=j.get("reasoning", ""),
         ))
 
-    # 日付順ソート
-    entries.sort(key=lambda e: e.entry_date)
+    # 取り込み順ソート（createdAt基準）
+    # entries はドキュメント順に追加されているのでそのまま
+
+    # 重複除外（取引先+金額が同じものは最初の1件のみ）
+    seen = set()
+    deduped = []
+    dup_count = 0
+    for e in entries:
+        key = (e.vendor, e.debit_amount)
+        if key in seen:
+            dup_count += 1
+            print(f"[CSV重複除外] {e.vendor} ¥{e.debit_amount}")
+            continue
+        seen.add(key)
+        deduped.append(e)
+    if dup_count:
+        print(f"[CSV] 重複{dup_count}件を除外")
+    entries = deduped
 
     if format == "generic":
         csv_content = export_generic(entries)
         filename = "journal_entries.csv"
+        return StreamingResponse(
+            iter([csv_content]),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
     else:
-        csv_content = export_zaimu_ouen(entries)
+        csv_bytes = export_zaimu_ouen(entries)
         filename = "zaimu_ouen_import.csv"
-
-    return StreamingResponse(
-        iter([csv_content]),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
+        return StreamingResponse(
+            iter([csv_bytes]),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )

@@ -73,14 +73,16 @@ def judge_stage1(receipt: ReceiptData, patterns: list[JournalPattern], rules: li
    - カード → 未払金 or 買掛金（パターンの貸方科目に従う）
 4. 税率はレシート記載を優先（8%軽減税率の食品等に注意）
 5. パターンに該当するものがない場合は confidence: "low" とする
-6. 摘要は「取引先名 品目の要約」形式
+6. 摘要には得意先マスタにマッチした得意先名をそのまま入れる（マスタがない場合はOCRの取引先名）
+7. 科目コード（debit_code, credit_code）は数値のみ、先頭ゼロなし（例: "141"、"100"）
+8. 補助コードは別途後処理するのでJSONには含めないこと
 
 以下のJSON形式で返してください:
 {{
   "debit_account": "借方科目名",
-  "debit_code": "借方科目コード",
+  "debit_code": "借方科目コード（数値、先頭ゼロなし）",
   "credit_account": "貸方科目名",
-  "credit_code": "貸方科目コード",
+  "credit_code": "貸方科目コード（数値、先頭ゼロなし）",
   "tax_rate": "10",
   "tax_category": "税区分",
   "description": "摘要",
@@ -99,14 +101,22 @@ JSONのみ返してください。"""
     json_match = re.search(r"\{[\s\S]*\}", ai_text)
     result = json.loads(json_match.group()) if json_match else {}
 
+    # 科目コードの先頭ゼロを除去
+    debit_code = result.get("debit_code", "")
+    credit_code = result.get("credit_code", "")
+    if debit_code and debit_code.isdigit():
+        debit_code = str(int(debit_code))
+    if credit_code and credit_code.isdigit():
+        credit_code = str(int(credit_code))
+
     entry = JournalEntry(
         entry_date=receipt.date,
         debit_account=result.get("debit_account", ""),
-        debit_code=result.get("debit_code", ""),
+        debit_code=debit_code,
         debit_amount=receipt.amount,
         debit_tax_category=result.get("tax_category", ""),
         credit_account=result.get("credit_account", ""),
-        credit_code=result.get("credit_code", ""),
+        credit_code=credit_code,
         credit_amount=receipt.amount,
         credit_tax_category=result.get("tax_category", ""),
         tax_rate=result.get("tax_rate", receipt.tax_rate),
