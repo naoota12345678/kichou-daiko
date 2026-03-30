@@ -6,7 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-# bust cache: 2026-03-25
+# force rebuild: 2026-03-30-v1
+RUN echo "rebuild trigger"
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
