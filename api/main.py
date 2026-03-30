@@ -19,9 +19,10 @@ from pydantic import BaseModel
 from models import ReceiptData, JournalEntry, JournalPattern
 from journaling import process_receipt
 from csv_export import export_zaimu_ouen, export_generic
+import drive_upload
 from drive_upload import upload_receipt_to_drive, append_to_csv
 
-app = FastAPI(title="記帳代行 仕訳API")
+app = FastAPI(title="記帳代行 仕訳API", version="0.2.0")
 
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS", "http://localhost:3000"
@@ -111,6 +112,36 @@ def create_client(req: ClientCreate, authorization: str = Header(...)):
         "createdAt": firestore.SERVER_TIMESTAMP,
     })
     return {"id": ref.id, "name": req.name}
+
+
+class InstructionsUpdate(BaseModel):
+    instructions: str = ""
+
+
+@app.get("/api/clients/{client_id}/instructions")
+def get_instructions(client_id: str, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    doc = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id).get()
+    )
+    data = doc.to_dict() or {}
+    return {"instructions": data.get("handwrittenInstructions", "")}
+
+
+@app.put("/api/clients/{client_id}/instructions")
+def update_instructions(client_id: str, req: InstructionsUpdate, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .update({"handwrittenInstructions": req.instructions})
+    )
+    return {"ok": True}
 
 
 # ---- 仕訳パターン管理 ----
@@ -243,6 +274,91 @@ def delete_rule(client_id: str, rule_id: str, authorization: str = Header(...)):
     return {"ok": True}
 
 
+# ---- 得意先マスタ ----
+
+class CustomerCreate(BaseModel):
+    name: str
+    code: str = ""
+    account: str = "売掛金"
+    account_code: str = ""
+
+
+@app.get("/api/clients/{client_id}/customers")
+def list_customers(client_id: str, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("customers").stream()
+    )
+    customers = []
+    for doc in docs:
+        d = doc.to_dict()
+        d["id"] = doc.id
+        customers.append(d)
+    return {"customers": customers}
+
+
+@app.post("/api/clients/{client_id}/customers")
+def create_customer(client_id: str, req: CustomerCreate, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    ref = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("customers").document()
+    )
+    ref.set({
+        "name": req.name,
+        "code": req.code,
+        "account": req.account,
+        "accountCode": req.account_code,
+        "createdAt": firestore.SERVER_TIMESTAMP,
+    })
+    return {"id": ref.id, "name": req.name}
+
+
+@app.delete("/api/clients/{client_id}/customers/{customer_id}")
+def delete_customer(client_id: str, customer_id: str, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("customers").document(customer_id)
+        .delete()
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/clients/{client_id}/customers")
+def delete_all_customers(client_id: str, authorization: str = Header(...)):
+    """得意先マスタを全件削除"""
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("customers").stream()
+    )
+    batch = db.batch()
+    count = 0
+    for doc in docs:
+        batch.delete(doc.reference)
+        count += 1
+        if count % 500 == 0:
+            batch.commit()
+            batch = db.batch()
+    if count % 500 != 0:
+        batch.commit()
+    return {"ok": True, "deleted": count}
+
+
 # ---- レシートアップロード & 仕訳 ----
 
 def _load_patterns(office_id: str, client_id: str) -> list[JournalPattern]:
@@ -295,8 +411,8 @@ def _ocr_image(image_bytes: bytes) -> str:
     return ""
 
 
-def _extract_receipt_info(ocr_text: str) -> ReceiptData:
-    """HaikuでOCRテキストからレシート情報を抽出"""
+def _extract_receipt_info(ocr_text: str, is_handwritten: bool = False, image_bytes: bytes | None = None) -> tuple:
+    """HaikuでOCRテキストからレシート情報を抽出。金額0なら画像で再試行"""
     import anthropic
 
     current_year = date_type.today().year
@@ -304,10 +420,11 @@ def _extract_receipt_info(ocr_text: str) -> ReceiptData:
 
     response = ai_client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=512,
+        max_tokens=1024,
         messages=[{
             "role": "user",
-            "content": f"""以下はレシート/領収書のOCRテキストです。情報を抽出してください。
+            "content": f"""以下は{'手書きの領収書' if is_handwritten else 'レシート/領収書'}のOCRテキストです。情報を抽出してください。
+{'※手書きのため読み取りにくい文字があります。文脈から推測してください。' if is_handwritten else ''}
 
 --- OCRテキスト ---
 {ocr_text[:3000]}
@@ -322,11 +439,16 @@ def _extract_receipt_info(ocr_text: str) -> ReceiptData:
   - クレジット/VISA/JCB/電子マネー/PayPay/Suica等 → "カード"
   - お釣り/釣銭の記載あり → "現金"
   - 不明 → "現金"
-- taxRate: メインの税率。食品・飲料が主なら "8"、それ以外は "10"
+- taxBreakdown: 税率ごとの内訳（重要！）
+  - レシートに「8%対象」「10%対象」や「軽減税率対象」等の記載がある場合、それぞれの税込金額を抽出
   - ※マーク付き品目は軽減税率8%
+  - 1種類の税率しかない場合は1要素だけ
 - items: 主な品目名（最大5個）
 
-{{"vendor": "店名", "amount": 数値, "date": "YYYY-MM-DD", "invoiceNumber": "", "paymentMethod": "現金", "taxRate": "10", "items": ["品目1", "品目2"]}}
+以下のJSON形式で返してください:
+{{"vendor": "店名", "amount": 合計金額, "date": "YYYY-MM-DD", "invoiceNumber": "", "paymentMethod": "現金", "taxBreakdown": [{{"taxRate": "10", "amount": 10対象金額}}, {{"taxRate": "8", "amount": 8対象金額}}], "items": ["品目1", "品目2"]}}
+
+taxBreakdownは必ず配列で、税率が1種類でも配列にしてください。
 JSONのみ返してください。""",
         }],
     )
@@ -335,16 +457,471 @@ JSONのみ返してください。""",
     json_match = re.search(r"\{[\s\S]*\}", ai_text)
     extracted = json.loads(json_match.group()) if json_match else {}
 
+    # taxBreakdownから主要税率を判定
+    tax_breakdown = extracted.get("taxBreakdown", [])
+    if not tax_breakdown:
+        main_tax_rate = "10"
+    elif len(tax_breakdown) == 1:
+        main_tax_rate = str(tax_breakdown[0].get("taxRate", "10"))
+    else:
+        # 金額が大きい方をメイン税率とする
+        tax_breakdown.sort(key=lambda x: int(x.get("amount", 0)), reverse=True)
+        main_tax_rate = str(tax_breakdown[0].get("taxRate", "10"))
+
+    amount = int(extracted.get("amount") or 0)
+    vendor = extracted.get("vendor", "不明")
+    receipt_date = extracted.get("date", "")
+
+    # 金額0 or 取引先不明 → 画像を直接Haikuに送って再抽出
+    if image_bytes and (amount == 0 or vendor == "不明"):
+        print(f"[抽出] OCRテキストから抽出不十分（金額={amount}, 取引先={vendor}）→ 画像で再抽出")
+        try:
+            img_b64 = base64.b64encode(image_bytes).decode("ascii")
+            # content_typeを推測
+            if image_bytes[:4] == b'\x89PNG':
+                media_type = "image/png"
+            elif image_bytes[:2] == b'\xff\xd8':
+                media_type = "image/jpeg"
+            else:
+                media_type = "image/jpeg"
+
+            vision_response = ai_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": img_b64},
+                        },
+                        {
+                            "type": "text",
+                            "text": f"""この{'手書きの領収書' if is_handwritten else 'レシート/領収書'}の画像から情報を読み取ってください。
+
+■ 抽出ルール:
+- vendor: 店名・会社名
+- amount: 税込合計金額（数値のみ）
+- date: YYYY-MM-DD形式。現在{current_year}年前後
+- invoiceNumber: T+13桁の登録番号。なければ空文字
+- paymentMethod: "現金" or "カード"
+- items: 主な品目名（最大5個）
+
+{{"vendor": "店名", "amount": 数値, "date": "YYYY-MM-DD", "invoiceNumber": "", "paymentMethod": "現金", "items": ["品目1"]}}
+JSONのみ返してください。""",
+                        },
+                    ],
+                }],
+            )
+            vision_text = vision_response.content[0].text if vision_response.content else ""
+            vision_match = re.search(r"\{[\s\S]*\}", vision_text)
+            if vision_match:
+                vision_data = json.loads(vision_match.group())
+                new_amount = int(vision_data.get("amount") or 0)
+                new_vendor = vision_data.get("vendor", "")
+                print(f"[抽出] 画像再抽出: 取引先={new_vendor}, 金額={new_amount}")
+                if new_amount > 0:
+                    amount = new_amount
+                if new_vendor and new_vendor != "不明":
+                    vendor = new_vendor
+                if not receipt_date and vision_data.get("date"):
+                    receipt_date = vision_data["date"]
+                if not extracted.get("invoiceNumber") and vision_data.get("invoiceNumber"):
+                    extracted["invoiceNumber"] = vision_data["invoiceNumber"]
+                if not extracted.get("items") and vision_data.get("items"):
+                    extracted["items"] = vision_data["items"]
+        except Exception as e:
+            print(f"[抽出] 画像再抽出エラー: {e}")
+
     return ReceiptData(
-        vendor=extracted.get("vendor", "不明"),
-        amount=int(extracted.get("amount", 0)),
-        date=extracted.get("date", ""),
+        vendor=vendor,
+        amount=amount,
+        date=receipt_date,
         invoice_number=extracted.get("invoiceNumber", ""),
         payment_method=extracted.get("paymentMethod", "現金"),
-        tax_rate=extracted.get("taxRate", "10"),
+        tax_rate=main_tax_rate,
         items=extracted.get("items", []),
         ocr_text=ocr_text,
+    ), tax_breakdown
+
+
+@app.post("/api/receipts/upload")
+async def upload_receipt_only(
+    file: UploadFile = File(...),
+    client_id: str = Form(...),
+    receipt_type: str = Form("receipt"),
+    instructions: str = Form(""),
+    authorization: str = Header(...),
+):
+    """レシート画像をDriveにアップロードのみ（OCR/仕訳は後で）"""
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    image_bytes = await file.read()
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(400, "ファイルサイズは10MB以下にしてください")
+
+    client_doc = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id).get()
     )
+    client_name = (client_doc.to_dict() or {}).get("name", "unknown")
+
+    # Google Driveに画像保存
+    drive_file_id = ""
+    drive_url = ""
+    try:
+        ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+        drive_filename = f"未処理_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+        drive_result = upload_receipt_to_drive(
+            image_bytes=image_bytes,
+            client_name=client_name,
+            receipt_date=datetime.now().strftime("%Y-%m-%d"),
+            filename=drive_filename,
+            payment_method="現金",
+            content_type=file.content_type or "image/jpeg",
+        )
+        drive_file_id = drive_result.get("file_id", "")
+        drive_url = drive_result.get("url", "")
+    except Exception as e:
+        print(f"[Drive] Upload failed: {e}")
+
+    # Firestoreに未処理として保存（画像データもBase64で保存）
+    receipt_ref = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("receipts").document()
+    )
+    receipt_ref.set({
+        "fileName": file.filename,
+        "driveFileId": drive_file_id,
+        "driveUrl": drive_url,
+        "contentType": file.content_type or "image/jpeg",
+        "receiptType": receipt_type,
+        "instructions": instructions,
+        "status": "uploaded",
+        "processedBy": uid,
+        "createdAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    return {
+        "receiptId": receipt_ref.id,
+        "fileName": file.filename,
+        "driveUrl": drive_url,
+        "status": "uploaded",
+    }
+
+
+@app.post("/api/clients/{client_id}/process-all")
+def process_all_uploaded(
+    client_id: str,
+    receipt_type: str | None = None,
+    authorization: str = Header(...),
+):
+    """未処理（uploaded）のレシートを一括OCR→仕訳判定"""
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    # uploaded状態のレシートを取得
+    docs = list(
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("receipts")
+        .where("status", "==", "uploaded")
+        .stream()
+    )
+
+    # receiptTypeでフィルタ
+    if receipt_type:
+        docs = [d for d in docs if (d.to_dict().get("receiptType", "receipt") == receipt_type)]
+
+    if not docs:
+        return {"processed": 0, "results": []}
+
+    patterns = _load_patterns(office_id, client_id)
+    rules = _load_rules(office_id, client_id)
+
+    # 得意先マスタを読み込み、ルールに追加
+    customer_docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("customers").stream()
+    )
+    customers = [d.to_dict() for d in customer_docs]
+
+    # 補助コード→得意先名のマップ（摘要を補助と同じにするため）
+    code_to_name = {}
+    name_to_name = {}
+    for c in customers:
+        if c.get("code"):
+            code_to_name[c["code"]] = c.get("name", "")
+        if c.get("name"):
+            name_to_name[c["name"]] = c.get("name", "")
+    print(f"[得意先マスタ] {len(customers)}件, コードマップ: {code_to_name}")
+
+    def _match_customer(entry: JournalEntry, code_map: dict, cust_list: list) -> dict | None:
+        """仕訳のdebit_code/vendor/descriptionから得意先をマッチ。名前と補助コードを返す"""
+        # 1. debit_codeで完全一致
+        if entry.debit_code and entry.debit_code in code_map:
+            print(f"[得意先マッチ] debit_code={entry.debit_code} → {code_map[entry.debit_code]}")
+            return {"name": code_map[entry.debit_code], "code": entry.debit_code}
+
+        # 法人格を除去して比較する関数
+        def normalize(s: str) -> str:
+            for w in ["株式会社", "有限会社", "合同会社", "㈱", "㈲", "(株)", "(有)", "（株）", "（有）"]:
+                s = s.replace(w, "")
+            return s.strip()
+
+        vendor_norm = normalize(entry.vendor or "")
+        desc_norm = normalize(entry.description or "")
+
+        # 2. 正規化して部分一致
+        for c in cust_list:
+            cname = c.get("name", "")
+            if not cname:
+                continue
+            cname_norm = normalize(cname)
+            if (cname_norm and vendor_norm and
+                (cname_norm in vendor_norm or vendor_norm in cname_norm or
+                 cname_norm in desc_norm or desc_norm in cname_norm)):
+                print(f"[得意先マッチ] 部分一致: {entry.vendor} → {cname} (補助:{c.get('code','')})")
+                return {"name": cname, "code": c.get("code", "")}
+
+        # 3. あいまいマッチ（共通文字数が7割以上）
+        for c in cust_list:
+            cname = c.get("name", "")
+            if not cname or len(cname) < 2:
+                continue
+            cname_norm = normalize(cname)
+            if not vendor_norm:
+                continue
+            common = sum(1 for ch in cname_norm if ch in vendor_norm)
+            ratio = common / max(len(cname_norm), 1)
+            if ratio >= 0.7:
+                print(f"[得意先マッチ] あいまい({ratio:.0%}): {entry.vendor} → {cname} (補助:{c.get('code','')})")
+                return {"name": cname, "code": c.get("code", "")}
+
+        print(f"[得意先マッチ] マッチなし: debit_code={entry.debit_code}, vendor={entry.vendor}")
+        return None
+
+    if customers:
+        customer_lines = ["""■ 得意先マスタ（重要！必ず以下のルールに従ってください）:
+- OCRで読み取った取引先名と以下のマスタを照合してください
+- 完全一致でなくてOK。7割程度一致していればそのマスタの補助科目を使ってください
+  例: マスタ「株式会社山田工業」← OCR「(株)山田工業」「ヤマダコウギョウ」「山田工業㈱」→ 一致とみなす
+  例: マスタ「田中商店」← OCR「タナカ商店」「田中ショウテン」→ 一致とみなす
+- どのマスタにも当てはまらない場合は補助科目を「その他」にしてください
+- 摘要（description）には、マッチした得意先マスタの「得意先名」をそのまま入れてください（補助科目と同じ名前）
+- debit_codeには得意先の補助コードを入れてください"""]
+        for c in customers:
+            line = f"- {c.get('name', '')}"
+            if c.get('code'):
+                line += f" (補助コード: {c['code']})"
+            line += f" → {c.get('account', '売掛金')}"
+            if c.get('accountCode'):
+                line += f"({c['accountCode']})"
+            customer_lines.append(line)
+        rules = list(rules) + ["\n".join(customer_lines)]
+
+    client_doc = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id).get()
+    )
+    client_name = (client_doc.to_dict() or {}).get("name", "unknown")
+
+    results = []
+    for doc in docs:
+        d = doc.to_dict()
+        receipt_id = doc.id
+        file_name = d.get("fileName", "不明")
+
+        try:
+            # Driveから画像を取得してOCR
+            drive_fid = d.get("driveFileId", "")
+            if not drive_fid:
+                results.append({"receiptId": receipt_id, "fileName": file_name, "error": "Drive画像なし"})
+                continue
+
+            try:
+                service = drive_upload._get_service()
+                image_bytes = service.files().get_media(
+                    fileId=drive_fid, supportsAllDrives=True
+                ).execute()
+            except Exception as e:
+                results.append({"receiptId": receipt_id, "fileName": file_name, "error": f"Drive取得失敗: {e}"})
+                continue
+            ocr_text = _ocr_image(image_bytes)
+            if not ocr_text:
+                results.append({"receiptId": receipt_id, "fileName": file_name, "error": "OCR失敗"})
+                continue
+
+            # レシート情報抽出
+            is_handwritten = d.get("receiptType", "receipt") == "handwritten"
+            extra_instructions = d.get("instructions", "")
+            receipt, tax_breakdown = _extract_receipt_info(ocr_text, is_handwritten=is_handwritten, image_bytes=image_bytes)
+
+            # 追加指示がある場合、ルールに追加
+            effective_rules = list(rules)
+            if extra_instructions:
+                effective_rules.append(extra_instructions)
+
+            # Drive上のファイル名を正しいものにリネーム
+            drive_file_id = d.get("driveFileId", "")
+            if drive_file_id:
+                try:
+                    from googleapiclient.discovery import build as _build
+                    service = drive_upload._get_service()
+                    ext = os.path.splitext(d.get("fileName", ""))[1] or ".jpg"
+                    new_name = drive_upload._sanitize(
+                        f"{receipt.date}_{receipt.vendor}_¥{receipt.amount}{ext}"
+                    )
+                    service.files().update(
+                        fileId=drive_file_id,
+                        body={"name": new_name},
+                        supportsAllDrives=True,
+                    ).execute()
+                except Exception as e:
+                    print(f"[Drive] Rename failed: {e}")
+
+            # 税率分割対応
+            entries_to_save = []
+            if len(tax_breakdown) >= 2:
+                for tb in tax_breakdown:
+                    tb_rate = str(tb.get("taxRate", "10"))
+                    tb_amount = int(tb.get("amount", 0))
+                    if tb_amount <= 0:
+                        continue
+                    sub_receipt = ReceiptData(
+                        vendor=receipt.vendor, amount=tb_amount,
+                        date=receipt.date, invoice_number=receipt.invoice_number,
+                        payment_method=receipt.payment_method, tax_rate=tb_rate,
+                        items=receipt.items, ocr_text=receipt.ocr_text,
+                    )
+                    entry = process_receipt(sub_receipt, patterns, effective_rules)
+                    # 得意先マッチ → 摘要と補助コードを設定
+                    matched = _match_customer(entry, code_to_name, customers)
+                    if matched:
+                        entry.description = matched["name"]
+                        if matched["code"]:
+                            entry.debit_code = matched["code"]
+                    elif customers:
+                        entry.description = entry.vendor or "その他"
+                        entry.debit_code = "その他"
+                    entries_to_save.append((sub_receipt, entry, tb_rate))
+            else:
+                entry = process_receipt(receipt, patterns, effective_rules)
+                # 得意先マッチ → 摘要と補助コードを設定
+                matched = _match_customer(entry, code_to_name, customers)
+                if matched:
+                    entry.description = matched["name"]
+                    if matched["code"]:
+                        entry.debit_code = matched["code"]
+                elif customers:
+                    entry.description = entry.vendor or "その他"
+                    entry.debit_code = "その他"
+                entries_to_save.append((receipt, entry, receipt.tax_rate))
+
+            # 元のドキュメントを更新（最初の仕訳）
+            first_receipt, first_entry, first_rate = entries_to_save[0]
+            doc.reference.update({
+                "ocrText": ocr_text[:5000],
+                "vendor": receipt.vendor,
+                "amount": first_receipt.amount,
+                "date": receipt.date,
+                "invoiceNumber": receipt.invoice_number,
+                "paymentMethod": receipt.payment_method,
+                "taxRate": first_rate,
+                "items": receipt.items,
+                "journal": {
+                    "debitAccount": first_entry.debit_account,
+                    "debitCode": first_entry.debit_code,
+                    "debitAmount": first_entry.debit_amount,
+                    "debitTaxCategory": first_entry.debit_tax_category,
+                    "creditAccount": first_entry.credit_account,
+                    "creditCode": first_entry.credit_code,
+                    "creditAmount": first_entry.credit_amount,
+                    "creditTaxCategory": first_entry.credit_tax_category,
+                    "taxRate": first_entry.tax_rate,
+                    "description": first_entry.description,
+                    "vendor": first_entry.vendor,
+                    "confidence": first_entry.confidence,
+                    "reasoning": first_entry.reasoning,
+                },
+                "status": "pending",
+            })
+
+            # 税率分割で2行目以降は新規ドキュメント
+            for sub_receipt, entry, tax_rate in entries_to_save[1:]:
+                new_ref = (
+                    db.collection("offices").document(office_id)
+                    .collection("clients").document(client_id)
+                    .collection("receipts").document()
+                )
+                new_ref.set({
+                    "fileName": d.get("fileName", ""),
+                    "driveFileId": drive_file_id,
+                    "driveUrl": d.get("driveUrl", ""),
+                    "vendor": receipt.vendor,
+                    "amount": sub_receipt.amount,
+                    "date": receipt.date,
+                    "invoiceNumber": receipt.invoice_number,
+                    "paymentMethod": receipt.payment_method,
+                    "taxRate": tax_rate,
+                    "items": receipt.items,
+                    "journal": {
+                        "debitAccount": entry.debit_account,
+                        "debitCode": entry.debit_code,
+                        "debitAmount": entry.debit_amount,
+                        "debitTaxCategory": entry.debit_tax_category,
+                        "creditAccount": entry.credit_account,
+                        "creditCode": entry.credit_code,
+                        "creditAmount": entry.credit_amount,
+                        "creditTaxCategory": entry.credit_tax_category,
+                        "taxRate": entry.tax_rate,
+                        "description": entry.description,
+                        "vendor": entry.vendor,
+                        "confidence": entry.confidence,
+                        "reasoning": entry.reasoning,
+                    },
+                    "status": "pending",
+                    "processedBy": uid,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                })
+
+            # CSV追記
+            for sub_receipt, entry, _ in entries_to_save:
+                try:
+                    append_to_csv(
+                        client_name=client_name,
+                        receipt_date=receipt.date,
+                        payment_method=receipt.payment_method,
+                        row_data={
+                            "date": receipt.date, "vendor": entry.vendor,
+                            "amount": sub_receipt.amount,
+                            "debit_account": entry.debit_account,
+                            "credit_account": entry.credit_account,
+                            "tax_rate": f"{entry.tax_rate}%",
+                            "description": entry.description,
+                            "confidence": entry.confidence,
+                        },
+                    )
+                except Exception as e:
+                    print(f"[CSV] Failed: {e}")
+
+            results.append({
+                "receiptId": receipt_id,
+                "fileName": file_name,
+                "vendor": receipt.vendor,
+                "amount": receipt.amount,
+                "entries": len(entries_to_save),
+            })
+            print(f"[処理完了] {file_name} → {receipt.vendor} ¥{receipt.amount}")
+
+        except Exception as e:
+            print(f"[処理エラー] {file_name}: {e}")
+            results.append({"receiptId": receipt_id, "fileName": file_name, "error": str(e)})
+
+    return {"processed": len(results), "results": results}
 
 
 @app.post("/api/receipts/process")
@@ -370,16 +947,12 @@ async def process_receipt_upload(
     print(f"[OCR] Extracted {len(ocr_text)} chars")
 
     # 2. レシート情報抽出（Haiku）
-    receipt = _extract_receipt_info(ocr_text)
-    print(f"[抽出] {receipt.vendor} ¥{receipt.amount} {receipt.payment_method}")
+    receipt, tax_breakdown = _extract_receipt_info(ocr_text, image_bytes=image_bytes)
+    print(f"[抽出] {receipt.vendor} ¥{receipt.amount} {receipt.payment_method} 税率内訳: {tax_breakdown}")
 
     # 3. 仕訳パターン & ルール読み込み
     patterns = _load_patterns(office_id, client_id)
     rules = _load_rules(office_id, client_id)
-
-    # 4. 仕訳判定（Haiku → 必要ならOpus）
-    entry = process_receipt(receipt, patterns, rules)
-    print(f"[仕訳] {entry.debit_account} / {entry.credit_account} confidence={entry.confidence}")
 
     # 5. Google Driveに画像保存
     client_doc = (
@@ -407,89 +980,129 @@ async def process_receipt_upload(
     except Exception as e:
         print(f"[Drive] Upload failed: {e}")
 
-    # 6. Firestoreに保存
-    receipt_ref = (
-        db.collection("offices").document(office_id)
-        .collection("clients").document(client_id)
-        .collection("receipts").document()
-    )
+    # 4. 税率ごとに仕訳を生成（8%/10%混在対応）
+    entries_to_save = []
+    if len(tax_breakdown) >= 2:
+        # 税率が複数ある → 税率ごとに仕訳を分ける
+        for tb in tax_breakdown:
+            tb_rate = str(tb.get("taxRate", "10"))
+            tb_amount = int(tb.get("amount", 0))
+            if tb_amount <= 0:
+                continue
+            sub_receipt = ReceiptData(
+                vendor=receipt.vendor,
+                amount=tb_amount,
+                date=receipt.date,
+                invoice_number=receipt.invoice_number,
+                payment_method=receipt.payment_method,
+                tax_rate=tb_rate,
+                items=receipt.items,
+                ocr_text=receipt.ocr_text,
+            )
+            entry = process_receipt(sub_receipt, patterns, rules)
+            entries_to_save.append((sub_receipt, entry, tb_rate))
+            print(f"[仕訳] {tb_rate}%分 ¥{tb_amount}: {entry.debit_account} / {entry.credit_account}")
+    else:
+        # 税率が1種類 → 通常処理
+        entry = process_receipt(receipt, patterns, rules)
+        entries_to_save.append((receipt, entry, receipt.tax_rate))
+        print(f"[仕訳] {entry.debit_account} / {entry.credit_account} confidence={entry.confidence}")
 
-    receipt_ref.set({
-        "fileName": file.filename,
-        "driveFileId": drive_file_id,
-        "driveUrl": drive_url,
-        "ocrText": ocr_text[:5000],
-        "vendor": receipt.vendor,
-        "amount": receipt.amount,
-        "date": receipt.date,
-        "invoiceNumber": receipt.invoice_number,
-        "paymentMethod": receipt.payment_method,
-        "taxRate": receipt.tax_rate,
-        "items": receipt.items,
-        "journal": {
-            "debitAccount": entry.debit_account,
-            "debitCode": entry.debit_code,
-            "debitAmount": entry.debit_amount,
-            "debitTaxCategory": entry.debit_tax_category,
-            "creditAccount": entry.credit_account,
-            "creditCode": entry.credit_code,
-            "creditAmount": entry.credit_amount,
-            "creditTaxCategory": entry.credit_tax_category,
-            "taxRate": entry.tax_rate,
-            "description": entry.description,
-            "vendor": entry.vendor,
-            "confidence": entry.confidence,
-            "reasoning": entry.reasoning,
-        },
-        "status": "pending",
-        "processedBy": uid,
-        "createdAt": firestore.SERVER_TIMESTAMP,
-    })
-
-    # 7. Google DriveのCSVにデータ追記
-    try:
-        append_to_csv(
-            client_name=client_name,
-            receipt_date=receipt.date,
-            payment_method=receipt.payment_method,
-            row_data={
-                "date": receipt.date,
-                "vendor": entry.vendor,
-                "amount": receipt.amount,
-                "debit_account": entry.debit_account,
-                "credit_account": entry.credit_account,
-                "tax_rate": f"{entry.tax_rate}%",
-                "description": entry.description,
-                "confidence": entry.confidence,
-            },
+    # 6. Firestoreに保存（税率分割分も含む）
+    saved_entries = []
+    for sub_receipt, entry, tax_rate in entries_to_save:
+        receipt_ref = (
+            db.collection("offices").document(office_id)
+            .collection("clients").document(client_id)
+            .collection("receipts").document()
         )
-        print(f"[CSV] Appended to Drive CSV")
-    except Exception as e:
-        print(f"[CSV] Failed: {e}")
 
+        receipt_ref.set({
+            "fileName": file.filename,
+            "driveFileId": drive_file_id,
+            "driveUrl": drive_url,
+            "ocrText": ocr_text[:5000] if len(saved_entries) == 0 else "",
+            "vendor": receipt.vendor,
+            "amount": sub_receipt.amount,
+            "date": receipt.date,
+            "invoiceNumber": receipt.invoice_number,
+            "paymentMethod": receipt.payment_method,
+            "taxRate": tax_rate,
+            "items": receipt.items,
+            "journal": {
+                "debitAccount": entry.debit_account,
+                "debitCode": entry.debit_code,
+                "debitAmount": entry.debit_amount,
+                "debitTaxCategory": entry.debit_tax_category,
+                "creditAccount": entry.credit_account,
+                "creditCode": entry.credit_code,
+                "creditAmount": entry.credit_amount,
+                "creditTaxCategory": entry.credit_tax_category,
+                "taxRate": entry.tax_rate,
+                "description": entry.description,
+                "vendor": entry.vendor,
+                "confidence": entry.confidence,
+                "reasoning": entry.reasoning,
+            },
+            "status": "pending",
+            "processedBy": uid,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        })
+
+        saved_entries.append({
+            "receiptId": receipt_ref.id,
+            "amount": sub_receipt.amount,
+            "taxRate": tax_rate,
+            "journal": {
+                "debitAccount": entry.debit_account,
+                "debitCode": entry.debit_code,
+                "debitAmount": entry.debit_amount,
+                "creditAccount": entry.credit_account,
+                "creditCode": entry.credit_code,
+                "creditAmount": entry.credit_amount,
+                "taxRate": entry.tax_rate,
+                "description": entry.description,
+                "vendor": entry.vendor,
+                "confidence": entry.confidence,
+                "reasoning": entry.reasoning,
+            },
+        })
+
+        # 7. Google DriveのCSVにデータ追記
+        try:
+            append_to_csv(
+                client_name=client_name,
+                receipt_date=receipt.date,
+                payment_method=receipt.payment_method,
+                row_data={
+                    "date": receipt.date,
+                    "vendor": entry.vendor,
+                    "amount": sub_receipt.amount,
+                    "debit_account": entry.debit_account,
+                    "credit_account": entry.credit_account,
+                    "tax_rate": f"{entry.tax_rate}%",
+                    "description": entry.description,
+                    "confidence": entry.confidence,
+                },
+            )
+        except Exception as e:
+            print(f"[CSV] Failed: {e}")
+
+    first = saved_entries[0] if saved_entries else {}
     return {
-        "receiptId": receipt_ref.id,
+        "receiptId": first.get("receiptId", ""),
         "receipt": {
             "vendor": receipt.vendor,
             "amount": receipt.amount,
             "date": receipt.date,
             "paymentMethod": receipt.payment_method,
             "taxRate": receipt.tax_rate,
+            "invoiceNumber": receipt.invoice_number,
             "items": receipt.items,
         },
-        "journal": {
-            "debitAccount": entry.debit_account,
-            "debitCode": entry.debit_code,
-            "debitAmount": entry.debit_amount,
-            "creditAccount": entry.credit_account,
-            "creditCode": entry.credit_code,
-            "creditAmount": entry.credit_amount,
-            "taxRate": entry.tax_rate,
-            "description": entry.description,
-            "vendor": entry.vendor,
-            "confidence": entry.confidence,
-            "reasoning": entry.reasoning,
-        },
+        "journal": first.get("journal", {}),
+        "entries": saved_entries,
+        "taxSplit": len(saved_entries) > 1,
     }
 
 
@@ -530,6 +1143,7 @@ class JournalUpdate(BaseModel):
     tax_rate: str = ""
     description: str = ""
     vendor: str = ""
+    amount: int | None = None
 
 
 @app.put("/api/clients/{client_id}/receipts/{receipt_id}")
@@ -564,6 +1178,10 @@ def update_journal(
         update_data["journal.description"] = req.description
     if req.vendor:
         update_data["journal.vendor"] = req.vendor
+    if req.amount is not None:
+        update_data["amount"] = req.amount
+        update_data["journal.debitAmount"] = req.amount
+        update_data["journal.creditAmount"] = req.amount
 
     ref.update(update_data)
     return {"ok": True}
@@ -588,6 +1206,25 @@ def confirm_journal(
     return {"ok": True}
 
 
+@app.delete("/api/clients/{client_id}/receipts/{receipt_id}")
+def delete_receipt(
+    client_id: str,
+    receipt_id: str,
+    authorization: str = Header(...),
+):
+    """レシート・仕訳を削除"""
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("receipts").document(receipt_id)
+        .delete()
+    )
+    return {"ok": True}
+
+
 # ---- CSVエクスポート ----
 
 @app.get("/api/clients/{client_id}/export")
@@ -596,6 +1233,8 @@ def export_csv(
     format: str = "zaimu_ouen",  # zaimu_ouen / generic
     status: str = "confirmed",    # confirmed / all
     payment_method: str = "",     # 現金 / カード / 空=全部
+    date_from: str = "",          # 日付範囲（開始）YYYY-MM-DD
+    date_to: str = "",            # 日付範囲（終了）YYYY-MM-DD
     authorization: str = Header(...),
 ):
     """仕訳CSVダウンロード"""
@@ -621,6 +1260,18 @@ def export_csv(
         # 支払方法フィルタ
         if payment_method and d.get("paymentMethod", "") != payment_method:
             continue
+
+        # アップロード日範囲フィルタ（createdAt基準）
+        created_at = d.get("createdAt")
+        if created_at and (date_from or date_to):
+            if hasattr(created_at, 'strftime'):
+                created_str = created_at.strftime("%Y-%m-%d")
+            else:
+                created_str = str(created_at)[:10]
+            if date_from and created_str < date_from:
+                continue
+            if date_to and created_str > date_to:
+                continue
 
         entries.append(JournalEntry(
             id=doc.id,
