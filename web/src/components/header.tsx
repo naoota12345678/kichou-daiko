@@ -1,32 +1,52 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
-
-const NAV_ITEMS = [
-  { href: "/scrape", label: "EC取得" },
-  { href: "/receipts/upload", label: "レシート" },
-  { href: "/csv", label: "CSV出力" },
-  { href: "/settings", label: "設定" },
-];
 
 export function Header() {
   const { user, signOut } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientName, setClientName] = useState("");
+  const pathname = usePathname();
+
+  // localStorageから選択中の顧問先を取得
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("selectedClient");
+      if (saved) {
+        const { id, name } = JSON.parse(saved);
+        if (id) { setClientId(id); setClientName(name); }
+      }
+    } catch {}
+  }, [pathname]);
+
+  const buildHref = (base: string) => {
+    if (!clientId) return base;
+    return `${base}?clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`;
+  };
+
+  const NAV_ITEMS = [
+    { href: buildHref("/receipts"), label: "レシート" },
+    { href: buildHref("/handwritten"), label: "手書き領収書" },
+    { href: buildHref("/journals"), label: "仕訳一覧" },
+    { href: buildHref("/rules"), label: "仕訳ルール" },
+    { href: buildHref("/csv"), label: "CSV出力" },
+  ];
 
   return (
     <header className="border-b bg-white">
       <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
-        <Link href="/dashboard" className="flex items-center">
-          <img src="/logo-nav.png" alt="dentyo" className="h-10" />
+        <Link href="/dashboard" className="font-bold text-lg">
+          記帳代行ツール
         </Link>
 
-        {/* PC: 横並びナビ */}
         <nav className="hidden md:flex items-center gap-4 text-sm">
           {NAV_ITEMS.map((item) => (
-            <Link key={item.href} href={item.href} className="hover:underline">
+            <Link key={item.label} href={item.href} className="hover:underline">
               {item.label}
             </Link>
           ))}
@@ -45,7 +65,6 @@ export function Header() {
           )}
         </div>
 
-        {/* モバイル: ハンバーガーメニュー */}
         <button
           className="md:hidden p-2"
           onClick={() => setMenuOpen(!menuOpen)}
@@ -61,12 +80,11 @@ export function Header() {
         </button>
       </div>
 
-      {/* モバイルメニュー展開 */}
       {menuOpen && (
         <div className="md:hidden border-t bg-white px-4 py-3 space-y-3">
           {NAV_ITEMS.map((item) => (
             <Link
-              key={item.href}
+              key={item.label}
               href={item.href}
               className="block py-2 text-sm hover:underline"
               onClick={() => setMenuOpen(false)}

@@ -10,8 +10,8 @@ const notoSansJP = Noto_Sans_JP({
 });
 
 export const metadata: Metadata = {
-  title: "電帳ツール - 電子帳簿保存法対応 経理自動化",
-  description: "領収書のアップロード・整理・仕訳CSV出力を自動化",
+  title: "記帳代行ツール",
+  description: "レシートから仕訳を自動生成。顧問先ごとの仕訳ルール・パターンに対応。",
 };
 
 export default function RootLayout({

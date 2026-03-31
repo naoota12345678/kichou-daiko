@@ -1,25 +1,43 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { Header } from "@/components/header";
-import { TrialBanner } from "@/components/trial-banner";
-import { usePlan } from "@/hooks/use-plan";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ClientSelector } from "@/components/client-selector";
+import { listReceipts } from "@/lib/api";
 import Link from "next/link";
 
 export default function DashboardPage() {
   const { user, loading } = useAuth();
   const router = useRouter();
-  const { trialExpired } = usePlan();
+  const [clientId, setClientId] = useState("");
+  const [clientName, setClientName] = useState("");
 
   useEffect(() => {
     if (!loading && !user) {
       router.push("/login");
     }
   }, [user, loading, router]);
+
+  // 選択状態をlocalStorageに保存/復元
+  useEffect(() => {
+    const saved = localStorage.getItem("selectedClient");
+    if (saved) {
+      try {
+        const { id, name } = JSON.parse(saved);
+        if (id) { setClientId(id); setClientName(name); }
+      } catch {}
+    }
+  }, []);
+
+  const handleSelect = (id: string, name: string) => {
+    setClientId(id);
+    setClientName(name);
+    localStorage.setItem("selectedClient", JSON.stringify({ id, name }));
+    // Cloud Runウォームアップ（バックグラウンドで呼んで起こす）
+    listReceipts(id).catch(() => {});
+  };
 
   if (loading || !user) {
     return (
@@ -32,72 +50,54 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <Header />
-      <TrialBanner />
-      <main className="mx-auto max-w-5xl px-4 py-8">
-        <h1 className="mb-6 text-2xl font-bold">ダッシュボード</h1>
+      <main className="mx-auto max-w-3xl px-4 py-8">
+        <h1 className="mb-6 text-2xl font-bold">記帳代行ツール</h1>
 
-        {trialExpired ? (
-          <Card>
-            <CardContent className="py-12 text-center">
-              <p className="text-lg font-medium mb-2">無料トライアル期間が終了しました</p>
-              <p className="text-sm text-muted-foreground mb-4">
-                引き続きご利用いただくには、プランへのお申し込みが必要です。
-              </p>
-              <p className="text-sm text-muted-foreground">
-                月額 <strong>1,480円</strong>（税別）・リリース記念 <strong>980円</strong>
-              </p>
-              <p className="text-sm text-muted-foreground mt-2">
-                お申し込み: <a href="mailto:contact@romu.ai" className="underline text-blue-600">contact@romu.ai</a>
-              </p>
-              <p className="text-xs text-muted-foreground mt-4">
-                ※ Google Driveに保存済みのデータはそのままお使いいただけます
-              </p>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid gap-6 grid-cols-1 sm:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">EC注文取得</CardTitle>
-                <CardDescription>
-                  Amazon・楽天・Yahooから自動取得
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Link href="/scrape">
-                  <Button className="w-full">注文を取得</Button>
-                </Link>
-              </CardContent>
-            </Card>
+        <div className="mb-6">
+          <ClientSelector selectedId={clientId} onSelect={handleSelect} />
+        </div>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">レシート撮影</CardTitle>
-                <CardDescription>
-                  撮影してDriveに保存・自動読み取り
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Link href="/receipts/upload">
-                  <Button variant="outline" className="w-full">撮影・アップロード</Button>
-                </Link>
-              </CardContent>
-            </Card>
+        {clientId ? (
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
+            <Link href={`/receipts?clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`}>
+              <div className="bg-white rounded-lg shadow-sm p-6 hover:shadow-md transition-shadow cursor-pointer">
+                <h2 className="font-bold text-lg mb-1">レシートアップロード</h2>
+                <p className="text-sm text-muted-foreground">撮影してDriveに保存・自動仕訳</p>
+              </div>
+            </Link>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">仕訳ルール</CardTitle>
-                <CardDescription>
-                  顧問先ごとの仕訳ルールを管理
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Link href="/rules">
-                  <Button variant="outline" className="w-full">ルール管理</Button>
-                </Link>
-              </CardContent>
-            </Card>
+            <Link href={`/handwritten?clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`}>
+              <div className="bg-white rounded-lg shadow-sm p-6 hover:shadow-md transition-shadow cursor-pointer">
+                <h2 className="font-bold text-lg mb-1">手書き領収書</h2>
+                <p className="text-sm text-muted-foreground">手書き領収書の読み取り・仕訳</p>
+              </div>
+            </Link>
+
+            <Link href={`/journals?clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`}>
+              <div className="bg-white rounded-lg shadow-sm p-6 hover:shadow-md transition-shadow cursor-pointer">
+                <h2 className="font-bold text-lg mb-1">仕訳一覧</h2>
+                <p className="text-sm text-muted-foreground">確認・修正・確定</p>
+              </div>
+            </Link>
+
+            <Link href={`/rules?clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`}>
+              <div className="bg-white rounded-lg shadow-sm p-6 hover:shadow-md transition-shadow cursor-pointer">
+                <h2 className="font-bold text-lg mb-1">仕訳ルール</h2>
+                <p className="text-sm text-muted-foreground">パターン・ルールを管理</p>
+              </div>
+            </Link>
+
+            <Link href={`/csv?clientId=${clientId}&clientName=${encodeURIComponent(clientName)}`}>
+              <div className="bg-white rounded-lg shadow-sm p-6 hover:shadow-md transition-shadow cursor-pointer">
+                <h2 className="font-bold text-lg mb-1">CSV出力</h2>
+                <p className="text-sm text-muted-foreground">財務応援R4形式 / 汎用CSV</p>
+              </div>
+            </Link>
           </div>
+        ) : (
+          <p className="text-sm text-muted-foreground bg-white rounded-lg shadow-sm p-6">
+            顧問先を選択してください。新しい顧問先は「+ 追加」から登録できます。
+          </p>
         )}
       </main>
     </div>

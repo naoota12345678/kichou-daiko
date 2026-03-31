@@ -842,6 +842,12 @@ def process_all_uploaded(
                 _apply_customer_match(entry, _match_customer(entry, code_to_name, customers), customers)
                 entries_to_save.append((receipt, entry, receipt.tax_rate))
 
+            # 税率分割で全件スキップされた場合はフォールバック
+            if not entries_to_save:
+                entry = process_receipt(receipt, patterns, effective_rules)
+                _apply_customer_match(entry, _match_customer(entry, code_to_name, customers), customers)
+                entries_to_save.append((receipt, entry, receipt.tax_rate))
+
             # 元のドキュメントを更新（最初の仕訳）
             first_receipt, first_entry, first_rate = entries_to_save[0]
             doc.reference.update({
@@ -1300,7 +1306,6 @@ def export_csv(
         db.collection("offices").document(office_id)
         .collection("clients").document(client_id)
         .collection("receipts")
-        .order_by("createdAt")
     )
 
     if status != "all":
@@ -1308,7 +1313,7 @@ def export_csv(
 
     docs = query.stream()
 
-    entries = []
+    entries_with_ts = []
     for doc in docs:
         d = doc.to_dict()
         j = d.get("journal", {})
@@ -1329,7 +1334,7 @@ def export_csv(
             if date_to and created_str > date_to:
                 continue
 
-        entries.append(JournalEntry(
+        entry = JournalEntry(
             id=doc.id,
             entry_date=d.get("date", ""),
             debit_account=j.get("debitAccount", ""),
@@ -1349,7 +1354,13 @@ def export_csv(
             vendor=j.get("vendor", d.get("vendor", "")),
             confidence=j.get("confidence", ""),
             reasoning=j.get("reasoning", ""),
-        ))
+        )
+        # ソート用にcreatedAtを保持
+        entries_with_ts.append((created_at, entry))
+
+    # 取り込み順（createdAt昇順）でソート
+    entries_with_ts.sort(key=lambda x: x[0] if x[0] else "")
+    entries = [e for _, e in entries_with_ts]
 
     # 取り込み順ソート（createdAt基準）
     # entries はドキュメント順に追加されているのでそのまま

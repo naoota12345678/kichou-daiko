@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# force rebuild: 2026-03-30-v8
+# force rebuild: 2026-03-31-v1
 RUN echo "cache bust"
 COPY . .
 ENV PORT=8080
