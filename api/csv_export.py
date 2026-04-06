@@ -7,6 +7,22 @@ import io
 from models import JournalEntry
 
 
+def _tax_code_from_rate(tax_rate: str) -> str:
+    """税率から借方消費税コードを返す（課税仕入→32, 非課税→空白）"""
+    if tax_rate in ("10", "8", "K8"):
+        return "32"
+    return ""
+
+
+def _tax_rate_display(tax_rate: str) -> str:
+    """税率の表示形式（10→10, 8→K8, それ以外→空白）"""
+    if tax_rate == "10":
+        return "10"
+    elif tax_rate in ("8", "K8"):
+        return "K8"
+    return ""
+
+
 def export_zaimu_ouen(entries: list[JournalEntry]) -> str:
     """財務応援R4 仕訳インポート形式CSV（44列）Shift-JIS"""
     buf = io.BytesIO()
@@ -36,6 +52,9 @@ def export_zaimu_ouen(entries: list[JournalEntry]) -> str:
     for e in entries:
         # 日付をYYYYMMDD形式に変換（ハイフン除去）
         date_str = e.entry_date.replace("-", "") if e.entry_date else ""
+        # 借方のみ消費税コード・税率を設定
+        debit_tax_code = _tax_code_from_rate(e.tax_rate)
+        debit_tax_rate = _tax_rate_display(e.tax_rate)
         writer.writerow([
             "",  # 月種別
             "",  # 種類
@@ -53,9 +72,9 @@ def export_zaimu_ouen(entries: list[JournalEntry]) -> str:
             e.debit_sub_code,  # 借方補助
             e.debit_sub_name,  # 借方補助科目名
             e.debit_amount,  # 借方金額
-            e.debit_tax_category,  # 借方消費税コード
+            debit_tax_code,  # 借方消費税コード（10%→32, 8%→81, 非課税→空白）
             "",  # 借方消費税業種
-            e.tax_rate,  # 借方消費税税率
+            debit_tax_rate,  # 借方消費税税率（10 or K8）
             "",  # 借方資金区分
             "",  # 借方任意項目１
             "",  # 借方任意項目２
@@ -67,9 +86,9 @@ def export_zaimu_ouen(entries: list[JournalEntry]) -> str:
             e.credit_sub_code,  # 貸方補助
             e.credit_sub_name,  # 貸方補助科目名
             e.credit_amount,  # 貸方金額
-            e.credit_tax_category,  # 貸方消費税コード
+            "",  # 貸方消費税コード（常に空白）
             "",  # 貸方消費税業種
-            e.tax_rate,  # 貸方消費税税率
+            "",  # 貸方消費税税率（常に空白）
             "",  # 貸方資金区分
             "",  # 貸方任意項目１
             "",  # 貸方任意項目２

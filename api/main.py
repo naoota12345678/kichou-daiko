@@ -274,6 +274,87 @@ def delete_rule(client_id: str, rule_id: str, authorization: str = Header(...)):
     return {"ok": True}
 
 
+# ---- 科目コードマスタ ----
+
+class AccountCreate(BaseModel):
+    code: str
+    name: str
+
+
+@app.get("/api/clients/{client_id}/accounts")
+def list_accounts(client_id: str, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("accounts").stream()
+    )
+    accounts = []
+    for doc in docs:
+        d = doc.to_dict()
+        d["id"] = doc.id
+        accounts.append(d)
+    return {"accounts": accounts}
+
+
+@app.post("/api/clients/{client_id}/accounts")
+def create_account(client_id: str, req: AccountCreate, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    ref = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("accounts").document()
+    )
+    ref.set({
+        "code": req.code,
+        "name": req.name,
+        "createdAt": firestore.SERVER_TIMESTAMP,
+    })
+    return {"id": ref.id, "code": req.code, "name": req.name}
+
+
+@app.delete("/api/clients/{client_id}/accounts/{account_id}")
+def delete_account(client_id: str, account_id: str, authorization: str = Header(...)):
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("accounts").document(account_id)
+        .delete()
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/clients/{client_id}/accounts")
+def delete_all_accounts(client_id: str, authorization: str = Header(...)):
+    """科目コードマスタを全件削除"""
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("accounts").stream()
+    )
+    batch = db.batch()
+    count = 0
+    for doc in docs:
+        batch.delete(doc.reference)
+        count += 1
+        if count % 500 == 0:
+            batch.commit()
+            batch = db.batch()
+    if count % 500 != 0:
+        batch.commit()
+    return {"ok": True, "deleted": count}
+
+
 # ---- 得意先マスタ ----
 
 class CustomerCreate(BaseModel):
@@ -384,6 +465,16 @@ def _load_patterns(office_id: str, client_id: str) -> list[JournalPattern]:
             description_template=d.get("descriptionTemplate", ""),
         ))
     return patterns
+
+
+def _load_accounts(office_id: str, client_id: str) -> list[dict]:
+    """Firestoreからクライアントの科目コードマスタを読み込み"""
+    docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("accounts").stream()
+    )
+    return [doc.to_dict() for doc in docs]
 
 
 def _load_rules(office_id: str, client_id: str) -> list[str]:
@@ -645,6 +736,15 @@ def process_all_uploaded(
 
     patterns = _load_patterns(office_id, client_id)
     rules = _load_rules(office_id, client_id)
+
+    # 科目コードマスタを読み込み、ルールに追加
+    accounts = _load_accounts(office_id, client_id)
+    if accounts:
+        account_lines = ["■ 科目コードマスタ（重要！この会社で使う勘定科目コードです。必ずこの中から選んでください）:"]
+        for a in accounts:
+            account_lines.append(f"- {a.get('code', '')} : {a.get('name', '')}")
+        rules = list(rules) + ["\n".join(account_lines)]
+        print(f"[科目コードマスタ] {len(accounts)}件")
 
     # 得意先マスタを読み込み、ルールに追加
     customer_docs = (
@@ -988,6 +1088,14 @@ async def process_receipt_upload(
     # 3. 仕訳パターン & ルール読み込み
     patterns = _load_patterns(office_id, client_id)
     rules = _load_rules(office_id, client_id)
+
+    # 科目コードマスタをルールに追加
+    accounts = _load_accounts(office_id, client_id)
+    if accounts:
+        account_lines = ["■ 科目コードマスタ（重要！この会社で使う勘定科目コードです。必ずこの中から選んでください）:"]
+        for a in accounts:
+            account_lines.append(f"- {a.get('code', '')} : {a.get('name', '')}")
+        rules = list(rules) + ["\n".join(account_lines)]
 
     # 5. Google Driveに画像保存
     client_doc = (

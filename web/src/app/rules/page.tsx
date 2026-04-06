@@ -8,6 +8,7 @@ import {
   listPatterns, createPattern, deletePattern,
   listRules, createRule, deleteRule,
   listCustomers, createCustomer, deleteCustomer, deleteAllCustomers,
+  listAccounts, createAccount, deleteAccount, deleteAllAccounts,
 } from "@/lib/api";
 
 interface Pattern {
@@ -41,6 +42,11 @@ function RulesPageContent() {
   const [customers, setCustomers] = useState<any[]>([]);
   const [showCustomerForm, setShowCustomerForm] = useState(false);
   const [customerForm, setCustomerForm] = useState({ name: "", code: "", account: "売掛金", account_code: "" });
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [showAccountForm, setShowAccountForm] = useState(false);
+  const [accountForm, setAccountForm] = useState({ code: "", name: "" });
+  const [accountCsvUploading, setAccountCsvUploading] = useState(false);
+  const [accountCsvProgress, setAccountCsvProgress] = useState("");
   const [csvUploading, setCsvUploading] = useState(false);
   const [csvProgress, setCsvProgress] = useState("");
   const [showPatternForm, setShowPatternForm] = useState(false);
@@ -63,14 +69,16 @@ function RulesPageContent() {
   const loadData = async () => {
     if (!clientId) return;
     try {
-      const [pData, rData, cData] = await Promise.all([
+      const [pData, rData, cData, aData] = await Promise.all([
         listPatterns(clientId),
         listRules(clientId),
         listCustomers(clientId),
+        listAccounts(clientId),
       ]);
       setPatterns(pData.patterns || []);
       setRules(rData.rules || []);
       setCustomers(cData.customers || []);
+      setAccounts(aData.accounts || []);
     } catch (e) {
       console.error("Failed to load:", e);
     }
@@ -423,6 +431,129 @@ function RulesPageContent() {
                     </p>
                   </div>
                   <button onClick={() => { deleteCustomer(clientId, c.id).then(() => loadData()); }} className="text-muted-foreground hover:text-red-500 shrink-0 px-1">
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        {/* 科目コードマスタ */}
+        <div className="bg-white rounded-lg shadow-sm p-4 mt-6">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="font-bold text-base">科目コードマスタ</h2>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowAccountForm(!showAccountForm)}
+                className="text-sm px-3 py-1 bg-gray-100 rounded hover:bg-gray-200"
+              >
+                {showAccountForm ? "閉じる" : "+ 追加"}
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground mb-3">
+            この会社の勘定科目コード一覧です。AI仕訳判定時に参照します。
+          </p>
+
+          {/* CSV一括取り込み */}
+          <div className="border rounded p-3 mb-4">
+            <p className="text-xs font-medium mb-1">CSV一括取り込み</p>
+            <p className="text-xs text-muted-foreground mb-2">
+              形式: 科目コード,科目名（1行1件、ヘッダー行不要）
+            </p>
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              id="account-csv"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setAccountCsvUploading(true);
+                setAccountCsvProgress("読み込み中...");
+                const text = await file.text();
+                const lines = text.split(/\r?\n/).filter((l) => l.trim());
+                let count = 0;
+                const total = lines.filter((l) => l.split(",")[0]?.trim()).length;
+                for (const line of lines) {
+                  const cols = line.split(",").map((c) => c.trim());
+                  if (!cols[0]) continue;
+                  await createAccount(clientId, {
+                    code: cols[0],
+                    name: cols[1] || "",
+                  });
+                  count++;
+                  setAccountCsvProgress(`登録中... (${count}/${total})`);
+                }
+                setAccountCsvUploading(false);
+                setAccountCsvProgress("");
+                alert(`${count}件の科目コードを登録しました`);
+                e.target.value = "";
+                await loadData();
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => document.getElementById("account-csv")?.click()}
+              disabled={accountCsvUploading}
+              className="px-4 py-2 bg-gray-100 rounded text-sm hover:bg-gray-200 disabled:opacity-50"
+            >
+              {accountCsvUploading ? accountCsvProgress : "CSVファイルを選択"}
+            </button>
+          </div>
+
+          {showAccountForm && (
+            <div className="border rounded p-3 mb-4 space-y-2">
+              <p className="text-xs font-medium mb-1">個別追加</p>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-muted-foreground">科目コード</label>
+                  <input value={accountForm.code} onChange={(e) => setAccountForm({ ...accountForm, code: e.target.value })} placeholder="610" className="w-full p-2 border rounded text-sm" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground">科目名</label>
+                  <input value={accountForm.name} onChange={(e) => setAccountForm({ ...accountForm, name: e.target.value })} placeholder="消耗品費" className="w-full p-2 border rounded text-sm" />
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  if (!accountForm.code.trim()) return;
+                  await createAccount(clientId, accountForm);
+                  setAccountForm({ code: "", name: "" });
+                  setShowAccountForm(false);
+                  await loadData();
+                }}
+                disabled={!accountForm.code.trim()}
+                className="px-4 py-2 bg-black text-white rounded text-sm disabled:opacity-50"
+              >
+                登録
+              </button>
+            </div>
+          )}
+
+          {accounts.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-2">科目コードが登録されていません</p>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">{accounts.length}件登録済み</p>
+                <button
+                  onClick={async () => {
+                    if (!window.confirm(`科目コード${accounts.length}件を全て削除しますか？`)) return;
+                    await deleteAllAccounts(clientId);
+                    await loadData();
+                  }}
+                  className="text-xs px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200"
+                >
+                  全件削除
+                </button>
+              </div>
+              {accounts.map((a: any) => (
+                <div key={a.id} className="flex items-start gap-2 text-sm py-2 px-3 rounded bg-gray-50">
+                  <div className="flex-1">
+                    <p className="font-medium">{a.code} - {a.name}</p>
+                  </div>
+                  <button onClick={() => { deleteAccount(clientId, a.id).then(() => loadData()); }} className="text-muted-foreground hover:text-red-500 shrink-0 px-1">
                     ✕
                   </button>
                 </div>

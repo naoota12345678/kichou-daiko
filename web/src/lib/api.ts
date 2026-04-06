@@ -109,6 +109,35 @@ export async function updateInstructions(clientId: string, instructions: string)
   return res.json();
 }
 
+// 科目コードマスタ
+export async function listAccounts(clientId: string) {
+  const res = await apiFetch(`/api/clients/${clientId}/accounts`);
+  return res.json();
+}
+
+export async function createAccount(clientId: string, data: { code: string; name: string }) {
+  const res = await apiFetch(`/api/clients/${clientId}/accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  return res.json();
+}
+
+export async function deleteAccount(clientId: string, accountId: string) {
+  const res = await apiFetch(`/api/clients/${clientId}/accounts/${accountId}`, {
+    method: "DELETE",
+  });
+  return res.json();
+}
+
+export async function deleteAllAccounts(clientId: string) {
+  const res = await apiFetch(`/api/clients/${clientId}/accounts`, {
+    method: "DELETE",
+  });
+  return res.json();
+}
+
 // 得意先マスタ
 export async function listCustomers(clientId: string) {
   const res = await apiFetch(`/api/clients/${clientId}/customers`);
