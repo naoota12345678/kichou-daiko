@@ -833,11 +833,13 @@ def process_all_uploaded(
                 entry.debit_sub_code = code
                 entry.debit_sub_name = name
         elif cust_list:
-            entry.description = entry.vendor or "その他"
+            # 売掛金がある仕訳のみ「その他」を設定（レシート経費はvendorをそのまま使う）
             if "売掛" in entry.debit_account:
+                entry.description = entry.vendor or "その他"
                 entry.debit_sub_code = "その他"
                 entry.debit_sub_name = "その他"
             elif "売掛" in entry.credit_account:
+                entry.description = entry.vendor or "その他"
                 entry.credit_sub_code = "その他"
                 entry.credit_sub_name = "その他"
 
