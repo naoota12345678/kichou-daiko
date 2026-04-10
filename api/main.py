@@ -1059,6 +1059,131 @@ def process_all_uploaded(
     return {"processed": len(results), "results": results}
 
 
+@app.post("/api/clients/{client_id}/import-from-drive")
+def import_from_drive(
+    client_id: str,
+    authorization: str = Header(...),
+):
+    """Google Driveフォルダ内の画像をスキャンしてFirestoreに未処理として登録"""
+    uid = verify_token(authorization)
+    office_id = get_office_id(uid)
+
+    # 顧問先名を取得
+    client_doc = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id).get()
+    )
+    if not client_doc.exists:
+        raise HTTPException(404, "顧問先が見つかりません")
+    client_name = (client_doc.to_dict() or {}).get("name", "unknown")
+
+    # 既にFirestoreに登録済みのDriveファイルIDを収集（重複防止）
+    existing_drive_ids = set()
+    existing_docs = (
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("receipts").stream()
+    )
+    for edoc in existing_docs:
+        fid = edoc.to_dict().get("driveFileId", "")
+        if fid:
+            existing_drive_ids.add(fid)
+
+    # Driveの顧問先フォルダを探す
+    service = drive_upload._get_service()
+    root_id = drive_upload.ROOT_FOLDER_ID
+
+    safe_client_name = drive_upload._sanitize(client_name)
+    q = (
+        f"'{root_id}' in parents "
+        f"and name = '{safe_client_name}' "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+    result = service.files().list(q=q, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+    client_folders = result.get("files", [])
+    if not client_folders:
+        return {"imported": 0, "skipped": 0, "message": f"Driveに「{client_name}」フォルダが見つかりません"}
+
+    client_folder_id = client_folders[0]["id"]
+
+    # 再帰的に画像ファイルを収集
+    image_mimes = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
+    all_images = []
+
+    def _list_images_recursive(folder_id: str, path: str = ""):
+        page_token = None
+        while True:
+            resp = service.files().list(
+                q=f"'{folder_id}' in parents and trashed = false",
+                fields="nextPageToken, files(id, name, mimeType, createdTime)",
+                pageSize=1000,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                pageToken=page_token,
+            ).execute()
+            for f in resp.get("files", []):
+                if f["mimeType"] == "application/vnd.google-apps.folder":
+                    _list_images_recursive(f["id"], f"{path}/{f['name']}")
+                elif f["mimeType"] in image_mimes:
+                    # CSVファイルや処理済みリネーム以外を対象
+                    all_images.append({
+                        "id": f["id"],
+                        "name": f["name"],
+                        "mimeType": f["mimeType"],
+                        "path": f"{path}/{f['name']}",
+                        "createdTime": f.get("createdTime", ""),
+                    })
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+    _list_images_recursive(client_folder_id, client_name)
+
+    # 新規のみをFirestoreに登録
+    imported = 0
+    skipped = 0
+    for img in all_images:
+        if img["id"] in existing_drive_ids:
+            skipped += 1
+            continue
+
+        # パスから現金/カードを判定
+        path_lower = img["path"]
+        if "カード" in path_lower:
+            payment_method = "カード"
+        else:
+            payment_method = "現金"
+
+        receipt_ref = (
+            db.collection("offices").document(office_id)
+            .collection("clients").document(client_id)
+            .collection("receipts").document()
+        )
+        receipt_ref.set({
+            "fileName": img["name"],
+            "driveFileId": img["id"],
+            "driveUrl": f"https://drive.google.com/file/d/{img['id']}/view",
+            "contentType": img["mimeType"],
+            "receiptType": "receipt",
+            "paymentMethod": payment_method,
+            "status": "uploaded",
+            "processedBy": uid,
+            "importedFromDrive": True,
+            "drivePath": img["path"],
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        })
+        imported += 1
+        print(f"[Drive取込] {img['path']} → Firestore登録")
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "total_in_drive": len(all_images),
+        "message": f"{imported}件取り込み、{skipped}件はスキップ（登録済み）",
+    }
+
+
 @app.post("/api/receipts/process")
 async def process_receipt_upload(
     file: UploadFile = File(...),

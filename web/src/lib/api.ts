@@ -201,6 +201,14 @@ export async function processAllUploaded(clientId: string, receiptType?: string)
   return res.json();
 }
 
+// Driveから画像を取り込み（Firestoreに未処理として登録）
+export async function importFromDrive(clientId: string) {
+  const res = await apiFetch(`/api/clients/${clientId}/import-from-drive`, {
+    method: "POST",
+  });
+  return res.json();
+}
+
 // レシート処理（アップロード+OCR+仕訳を同時に）
 export async function processReceipt(file: File, clientId: string) {
   const formData = new FormData();
