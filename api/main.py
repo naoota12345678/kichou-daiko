@@ -902,23 +902,70 @@ def process_all_uploaded(
             if extra_instructions:
                 effective_rules.append(extra_instructions)
 
-            # Drive上のファイル名を正しいものにリネーム
+            # Drive上のファイルをリネーム＆正しいフォルダに移動
             drive_file_id = d.get("driveFileId", "")
             if drive_file_id:
                 try:
-                    from googleapiclient.discovery import build as _build
                     service = drive_upload._get_service()
                     ext = os.path.splitext(d.get("fileName", ""))[1] or ".jpg"
                     new_name = drive_upload._sanitize(
                         f"{receipt.date}_{receipt.vendor}_¥{receipt.amount}{ext}"
                     )
-                    service.files().update(
-                        fileId=drive_file_id,
-                        body={"name": new_name},
-                        supportsAllDrives=True,
-                    ).execute()
+
+                    # 移動先フォルダを作成/取得: 顧問先/YYYY-MM/現金 or カード
+                    dest_folder_id = None
+                    if d.get("importedFromDrive") and receipt.date and len(receipt.date) >= 7:
+                        try:
+                            client_folder_id = drive_upload._find_or_create_folder(
+                                client_name, drive_upload.ROOT_FOLDER_ID
+                            )
+                            month_folder_id = drive_upload._find_or_create_folder(
+                                receipt.date[:7], client_folder_id
+                            )
+                            payment_folder = "カード" if receipt.payment_method == "カード" else "現金"
+                            dest_folder_id = drive_upload._find_or_create_folder(
+                                payment_folder, month_folder_id
+                            )
+                        except Exception as e:
+                            print(f"[Drive] Folder creation failed: {e}")
+
+                    # 現在の親フォルダを取得して移動
+                    if dest_folder_id:
+                        try:
+                            file_info = service.files().get(
+                                fileId=drive_file_id,
+                                fields="parents",
+                                supportsAllDrives=True,
+                            ).execute()
+                            current_parents = ",".join(file_info.get("parents", []))
+                            service.files().update(
+                                fileId=drive_file_id,
+                                body={"name": new_name},
+                                addParents=dest_folder_id,
+                                removeParents=current_parents,
+                                supportsAllDrives=True,
+                            ).execute()
+                            print(f"[Drive] Moved & renamed: {new_name} → {receipt.payment_method}/{receipt.date[:7]}")
+                        except Exception as e:
+                            print(f"[Drive] Move failed: {e}")
+                            # 移動失敗してもリネームだけ試す
+                            try:
+                                service.files().update(
+                                    fileId=drive_file_id,
+                                    body={"name": new_name},
+                                    supportsAllDrives=True,
+                                ).execute()
+                            except Exception:
+                                pass
+                    else:
+                        # importedFromDriveでない場合は従来通りリネームのみ
+                        service.files().update(
+                            fileId=drive_file_id,
+                            body={"name": new_name},
+                            supportsAllDrives=True,
+                        ).execute()
                 except Exception as e:
-                    print(f"[Drive] Rename failed: {e}")
+                    print(f"[Drive] Rename/Move failed: {e}")
 
             # 税率分割対応
             entries_to_save = []
@@ -1064,7 +1111,7 @@ def import_from_drive(
     client_id: str,
     authorization: str = Header(...),
 ):
-    """Google Driveフォルダ内の画像をスキャンしてFirestoreに未処理として登録"""
+    """Google Driveの「未処理」フォルダ内の画像をFirestoreに登録"""
     uid = verify_token(authorization)
     office_id = get_office_id(uid)
 
@@ -1089,7 +1136,7 @@ def import_from_drive(
         if fid:
             existing_drive_ids.add(fid)
 
-    # Driveの顧問先フォルダを探す
+    # Driveの顧問先フォルダ → 未処理フォルダを探す
     service = drive_upload._get_service()
     root_id = drive_upload.ROOT_FOLDER_ID
 
@@ -1107,38 +1154,32 @@ def import_from_drive(
 
     client_folder_id = client_folders[0]["id"]
 
-    # 再帰的に画像ファイルを収集
+    # 「未処理」フォルダを探す（なければ作成）
+    unprocessed_folder_id = drive_upload._find_or_create_folder("未処理", client_folder_id)
+
+    # 未処理フォルダ内の画像ファイルを取得
     image_mimes = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
     all_images = []
-
-    def _list_images_recursive(folder_id: str, path: str = ""):
-        page_token = None
-        while True:
-            resp = service.files().list(
-                q=f"'{folder_id}' in parents and trashed = false",
-                fields="nextPageToken, files(id, name, mimeType, createdTime)",
-                pageSize=1000,
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-                pageToken=page_token,
-            ).execute()
-            for f in resp.get("files", []):
-                if f["mimeType"] == "application/vnd.google-apps.folder":
-                    _list_images_recursive(f["id"], f"{path}/{f['name']}")
-                elif f["mimeType"] in image_mimes:
-                    # CSVファイルや処理済みリネーム以外を対象
-                    all_images.append({
-                        "id": f["id"],
-                        "name": f["name"],
-                        "mimeType": f["mimeType"],
-                        "path": f"{path}/{f['name']}",
-                        "createdTime": f.get("createdTime", ""),
-                    })
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
-
-    _list_images_recursive(client_folder_id, client_name)
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=f"'{unprocessed_folder_id}' in parents and trashed = false",
+            fields="nextPageToken, files(id, name, mimeType)",
+            pageSize=1000,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageToken=page_token,
+        ).execute()
+        for f in resp.get("files", []):
+            if f["mimeType"] in image_mimes:
+                all_images.append({
+                    "id": f["id"],
+                    "name": f["name"],
+                    "mimeType": f["mimeType"],
+                })
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
 
     # 新規のみをFirestoreに登録
     imported = 0
@@ -1147,13 +1188,6 @@ def import_from_drive(
         if img["id"] in existing_drive_ids:
             skipped += 1
             continue
-
-        # パスから現金/カードを判定
-        path_lower = img["path"]
-        if "カード" in path_lower:
-            payment_method = "カード"
-        else:
-            payment_method = "現金"
 
         receipt_ref = (
             db.collection("offices").document(office_id)
@@ -1166,15 +1200,13 @@ def import_from_drive(
             "driveUrl": f"https://drive.google.com/file/d/{img['id']}/view",
             "contentType": img["mimeType"],
             "receiptType": "receipt",
-            "paymentMethod": payment_method,
             "status": "uploaded",
             "processedBy": uid,
             "importedFromDrive": True,
-            "drivePath": img["path"],
             "createdAt": firestore.SERVER_TIMESTAMP,
         })
         imported += 1
-        print(f"[Drive取込] {img['path']} → Firestore登録")
+        print(f"[Drive取込] {img['name']} → Firestore登録")
 
     return {
         "imported": imported,
