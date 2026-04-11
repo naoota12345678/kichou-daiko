@@ -916,13 +916,15 @@ def process_all_uploaded(
 
                     # 移動先フォルダを作成/取得: 顧問先/YYYY-MM/現金 or カード
                     dest_folder_id = None
-                    if d.get("importedFromDrive") and receipt.date and len(receipt.date) >= 7:
+                    if d.get("importedFromDrive"):
                         try:
+                            # 処理月（今月）のフォルダに振り分け
+                            current_month = datetime.now().strftime("%Y-%m")
                             client_folder_id = drive_upload._find_or_create_folder(
                                 client_name, drive_upload.ROOT_FOLDER_ID
                             )
                             month_folder_id = drive_upload._find_or_create_folder(
-                                receipt.date[:7], client_folder_id
+                                current_month, client_folder_id
                             )
                             payment_folder = "カード" if receipt.payment_method == "カード" else "現金"
                             dest_folder_id = drive_upload._find_or_create_folder(
@@ -1637,21 +1639,16 @@ def export_csv(
     # 取り込み順ソート（createdAt基準）
     # entries はドキュメント順に追加されているのでそのまま
 
-    # 重複除外（取引先+金額が同じものは最初の1件のみ）
-    seen = set()
-    deduped = []
-    dup_count = 0
+    # 同日・同金額の重複チェック（除外はせずフラグを立てる）
+    from collections import Counter
+    date_amount_count = Counter()
     for e in entries:
-        key = (e.vendor, e.debit_amount)
-        if key in seen:
-            dup_count += 1
-            print(f"[CSV重複除外] {e.vendor} ¥{e.debit_amount}")
-            continue
-        seen.add(key)
-        deduped.append(e)
-    if dup_count:
-        print(f"[CSV] 重複{dup_count}件を除外")
-    entries = deduped
+        key = (e.entry_date, e.debit_amount)
+        date_amount_count[key] += 1
+    for e in entries:
+        key = (e.entry_date, e.debit_amount)
+        if date_amount_count[key] >= 2:
+            e.duplicate_flag = "※重複?"
 
     if format == "generic":
         csv_content = export_generic(entries)

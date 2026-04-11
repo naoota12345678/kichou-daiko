@@ -37,6 +37,7 @@ class JournalEntry:
     vendor: str = ""
     confidence: str = ""
     reasoning: str = ""
+    duplicate_flag: str = ""
 
 
 @dataclass

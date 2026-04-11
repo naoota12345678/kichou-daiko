@@ -60,7 +60,7 @@ def export_zaimu_ouen(entries: list[JournalEntry]) -> str:
             "",  # 種類
             "",  # 形式
             "",  # 作成方法
-            "",  # 付箋
+            e.duplicate_flag,  # 付箋（重複疑いフラグ）
             date_str,  # 伝票日付
             "",  # 伝票番号
             "",  # 伝票摘要
@@ -116,7 +116,7 @@ def export_generic(entries: list[JournalEntry]) -> str:
     writer.writerow([
         "日付", "借方科目", "借方コード", "借方補助", "借方補助名", "借方金額",
         "貸方科目", "貸方コード", "貸方補助", "貸方補助名", "貸方金額",
-        "税率", "摘要", "取引先", "確信度", "判断根拠",
+        "税率", "摘要", "取引先", "確信度", "判断根拠", "重複チェック",
     ])
 
     for e in entries:
@@ -137,6 +137,7 @@ def export_generic(entries: list[JournalEntry]) -> str:
             e.vendor,
             e.confidence,
             e.reasoning,
+            e.duplicate_flag,
         ])
 
     return output.getvalue()
