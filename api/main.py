@@ -931,22 +931,27 @@ def process_all_uploaded(
                         except Exception as e:
                             print(f"[Drive] Folder creation failed: {e}")
 
-                    # 現在の親フォルダを取得して移動
+                    # ファイルをコピー→元を削除で移動（共有ドライブ対応）
                     if dest_folder_id:
                         try:
-                            file_info = service.files().get(
+                            # 新しいファイルとしてコピー
+                            copied = service.files().copy(
                                 fileId=drive_file_id,
-                                fields="parents",
+                                body={"name": new_name, "parents": [dest_folder_id]},
                                 supportsAllDrives=True,
                             ).execute()
-                            current_parents = ",".join(file_info.get("parents", []))
-                            service.files().update(
+                            # 元のファイルを削除
+                            service.files().delete(
                                 fileId=drive_file_id,
-                                body={"name": new_name},
-                                addParents=dest_folder_id,
-                                removeParents=current_parents,
                                 supportsAllDrives=True,
                             ).execute()
+                            # FirestoreのdriveFileIdを新しいIDに更新
+                            new_drive_id = copied["id"]
+                            doc.reference.update({
+                                "driveFileId": new_drive_id,
+                                "driveUrl": f"https://drive.google.com/file/d/{new_drive_id}/view",
+                            })
+                            drive_file_id = new_drive_id
                             print(f"[Drive] Moved & renamed: {new_name} → {receipt.payment_method}/{receipt.date[:7]}")
                         except Exception as e:
                             print(f"[Drive] Move failed: {e}")
