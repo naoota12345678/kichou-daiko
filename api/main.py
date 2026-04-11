@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -869,6 +870,8 @@ def process_all_uploaded(
     client_name = (client_doc.to_dict() or {}).get("name", "unknown")
 
     results = []
+    csv_rows_cash = []  # 現金CSVデータ
+    csv_rows_card = []  # カードCSVデータ
     for doc in docs:
         d = doc.to_dict()
         receipt_id = doc.id
@@ -1079,25 +1082,21 @@ def process_all_uploaded(
                     "createdAt": firestore.SERVER_TIMESTAMP,
                 })
 
-            # CSV追記
+            # CSVデータを収集（後でまとめて書き込み）
             for sub_receipt, entry, _ in entries_to_save:
-                try:
-                    append_to_csv(
-                        client_name=client_name,
-                        receipt_date=receipt.date,
-                        payment_method=receipt.payment_method,
-                        row_data={
-                            "date": receipt.date, "vendor": entry.vendor,
-                            "amount": sub_receipt.amount,
-                            "debit_account": entry.debit_account,
-                            "credit_account": entry.credit_account,
-                            "tax_rate": f"{entry.tax_rate}%",
-                            "description": entry.description,
-                            "confidence": entry.confidence,
-                        },
-                    )
-                except Exception as e:
-                    print(f"[CSV] Failed: {e}")
+                row = {
+                    "date": receipt.date, "vendor": entry.vendor,
+                    "amount": sub_receipt.amount,
+                    "debit_account": entry.debit_account,
+                    "credit_account": entry.credit_account,
+                    "tax_rate": f"{entry.tax_rate}%",
+                    "description": entry.description,
+                    "confidence": entry.confidence,
+                }
+                if receipt.payment_method == "カード":
+                    csv_rows_card.append(row)
+                else:
+                    csv_rows_cash.append(row)
 
             results.append({
                 "receiptId": receipt_id,
@@ -1112,7 +1111,89 @@ def process_all_uploaded(
             print(f"[処理エラー] {file_name}: {e}")
             results.append({"receiptId": receipt_id, "fileName": file_name, "error": str(e)})
 
+    # 全件処理後にCSVをまとめて書き込み（処理月ベース）
+    current_month = datetime.now().strftime("%Y-%m-%d")  # append_to_csvは[:7]で月を取る
+    for payment, rows in [("現金", csv_rows_cash), ("カード", csv_rows_card)]:
+        if not rows:
+            continue
+        try:
+            _write_csv_batch(client_name, current_month, payment, rows)
+            print(f"[CSV] {payment}: {len(rows)}件書き込み完了")
+        except Exception as e:
+            print(f"[CSV] {payment} 書き込み失敗: {e}")
+
     return {"processed": len(results), "results": results}
+
+
+def _write_csv_batch(client_name: str, receipt_date: str, payment_method: str, rows: list[dict]):
+    """複数行をまとめてDrive CSVに書き込み"""
+    import csv
+
+    service = drive_upload._get_service()
+    root_id = drive_upload.ROOT_FOLDER_ID
+
+    client_folder_id = drive_upload._find_or_create_folder(client_name, root_id)
+    month_str = receipt_date[:7]
+    month_folder_id = drive_upload._find_or_create_folder(month_str, client_folder_id)
+
+    payment_label = "カード" if payment_method == "カード" else "現金"
+    csv_filename = f"{payment_label}.csv"
+
+    # 既存CSVを探す
+    q = (
+        f"'{month_folder_id}' in parents "
+        f"and name = '{csv_filename}' "
+        f"and mimeType != 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+    result = service.files().list(
+        q=q, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
+    ).execute()
+    existing = result.get("files", [])
+
+    headers = ["日付", "取引先", "金額", "借方科目", "貸方科目", "税率", "摘要", "確信度"]
+
+    output = io.StringIO()
+    output.write("\ufeff")
+
+    if existing:
+        file_id = existing[0]["id"]
+        content = service.files().get_media(
+            fileId=file_id, supportsAllDrives=True
+        ).execute().decode("utf-8-sig")
+        output.write(content.lstrip("\ufeff"))
+    else:
+        writer = csv.writer(output)
+        writer.writerow(headers)
+
+    writer = csv.writer(output)
+    for row in rows:
+        writer.writerow([
+            row.get("date", ""),
+            row.get("vendor", ""),
+            row.get("amount", ""),
+            row.get("debit_account", ""),
+            row.get("credit_account", ""),
+            row.get("tax_rate", ""),
+            row.get("description", ""),
+            row.get("confidence", ""),
+        ])
+
+    from googleapiclient.http import MediaIoBaseUpload
+    media = MediaIoBaseUpload(
+        io.BytesIO(output.getvalue().encode("utf-8-sig")),
+        mimetype="text/csv", resumable=False
+    )
+
+    if existing:
+        service.files().update(
+            fileId=existing[0]["id"], media_body=media, supportsAllDrives=True
+        ).execute()
+    else:
+        meta = {"name": csv_filename, "parents": [month_folder_id]}
+        service.files().create(
+            body=meta, media_body=media, fields="id", supportsAllDrives=True
+        ).execute()
 
 
 @app.post("/api/clients/{client_id}/import-from-drive")
