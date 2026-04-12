@@ -34,10 +34,15 @@ function ReceiptsPageContent() {
     if (!clientId || !user) return;
     try {
       const data = await listReceipts(clientId);
-      const uploaded = (data.receipts || []).filter(
-        (r: any) => r.status === "uploaded" && (r.receiptType || "receipt") === "receipt"
-      );
-      setPendingCount(uploaded.length);
+      // APIから正確なカウントが返る場合はそちらを使う
+      if (data.uploadedReceiptCount !== undefined) {
+        setPendingCount(data.uploadedReceiptCount);
+      } else {
+        const uploaded = (data.receipts || []).filter(
+          (r: any) => r.status === "uploaded" && (r.receiptType || "receipt") === "receipt"
+        );
+        setPendingCount(uploaded.length);
+      }
     } catch {}
   };
 

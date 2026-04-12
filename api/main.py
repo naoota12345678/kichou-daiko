@@ -943,27 +943,25 @@ def process_all_uploaded(
                         except Exception as e:
                             print(f"[Drive] Folder creation failed: {e}")
 
-                    # ファイルをコピー→元を削除で移動（共有ドライブ対応）
+                    # ファイルをリネーム＆移動（親フォルダ変更方式）
                     if dest_folder_id:
                         try:
-                            # 新しいファイルとしてコピー
-                            copied = service.files().copy(
+                            # 現在の親フォルダを取得
+                            file_meta = service.files().get(
                                 fileId=drive_file_id,
-                                body={"name": new_name, "parents": [dest_folder_id]},
+                                fields="parents",
                                 supportsAllDrives=True,
                             ).execute()
-                            # 元のファイルを削除
-                            service.files().delete(
+                            old_parents = ",".join(file_meta.get("parents", []))
+
+                            # リネーム＋親フォルダ変更で移動
+                            service.files().update(
                                 fileId=drive_file_id,
+                                body={"name": new_name},
+                                addParents=dest_folder_id,
+                                removeParents=old_parents,
                                 supportsAllDrives=True,
                             ).execute()
-                            # FirestoreのdriveFileIdを新しいIDに更新
-                            new_drive_id = copied["id"]
-                            doc.reference.update({
-                                "driveFileId": new_drive_id,
-                                "driveUrl": f"https://drive.google.com/file/d/{new_drive_id}/view",
-                            })
-                            drive_file_id = new_drive_id
                             print(f"[Drive] Moved & renamed: {new_name} → {receipt.payment_method}/{receipt.date[:7]}")
                         except Exception as e:
                             print(f"[Drive] Move failed: {e}")
@@ -1512,6 +1510,19 @@ def list_receipts(client_id: str, authorization: str = Header(...)):
     uid = verify_token(authorization)
     office_id = get_office_id(uid)
 
+    # uploaded件数を正確にカウント（limitなし）
+    uploaded_docs = list(
+        db.collection("offices").document(office_id)
+        .collection("clients").document(client_id)
+        .collection("receipts")
+        .where("status", "==", "uploaded")
+        .stream()
+    )
+    uploaded_count = len(uploaded_docs)
+    # receiptType別にカウント
+    uploaded_receipt_count = sum(1 for d in uploaded_docs if (d.to_dict().get("receiptType", "receipt") == "receipt"))
+    uploaded_handwritten_count = uploaded_count - uploaded_receipt_count
+
     docs = (
         db.collection("offices").document(office_id)
         .collection("clients").document(client_id)
@@ -1530,7 +1541,12 @@ def list_receipts(client_id: str, authorization: str = Header(...)):
         d.pop("ocrText", None)
         receipts.append(d)
 
-    return {"receipts": receipts}
+    return {
+        "receipts": receipts,
+        "uploadedCount": uploaded_count,
+        "uploadedReceiptCount": uploaded_receipt_count,
+        "uploadedHandwrittenCount": uploaded_handwritten_count,
+    }
 
 
 class JournalUpdate(BaseModel):
@@ -1657,6 +1673,7 @@ def export_csv(
     format: str = "zaimu_ouen",  # zaimu_ouen / generic
     status: str = "confirmed",    # confirmed / all
     payment_method: str = "",     # 現金 / カード / 空=全部
+    receipt_type: str = "receipt", # receipt / handwritten / 空=全部
     date_from: str = "",          # 日付範囲（開始）YYYY-MM-DD
     date_to: str = "",            # 日付範囲（終了）YYYY-MM-DD
     authorization: str = Header(...),
@@ -1680,6 +1697,10 @@ def export_csv(
     for doc in docs:
         d = doc.to_dict()
         j = d.get("journal", {})
+
+        # receiptTypeフィルタ
+        if receipt_type and d.get("receiptType", "receipt") != receipt_type:
+            continue
 
         # 支払方法フィルタ
         if payment_method and d.get("paymentMethod", "") != payment_method:

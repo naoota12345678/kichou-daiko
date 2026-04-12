@@ -51,10 +51,14 @@ function HandwrittenPageContent() {
     if (!clientId || !user) return;
     try {
       const data = await listReceipts(clientId);
-      const uploaded = (data.receipts || []).filter(
-        (r: any) => r.status === "uploaded" && r.receiptType === "handwritten"
-      );
-      setPendingCount(uploaded.length);
+      if (data.uploadedHandwrittenCount !== undefined) {
+        setPendingCount(data.uploadedHandwrittenCount);
+      } else {
+        const uploaded = (data.receipts || []).filter(
+          (r: any) => r.status === "uploaded" && r.receiptType === "handwritten"
+        );
+        setPendingCount(uploaded.length);
+      }
     } catch {}
   };
 
