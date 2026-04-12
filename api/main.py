@@ -1528,7 +1528,6 @@ def list_receipts(client_id: str, authorization: str = Header(...)):
         .collection("clients").document(client_id)
         .collection("receipts")
         .order_by("createdAt", direction=firestore.Query.DESCENDING)
-        .limit(200)
         .stream()
     )
 
