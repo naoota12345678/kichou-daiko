@@ -192,10 +192,13 @@ export async function uploadReceipt(
   return res.json();
 }
 
-// 未処理レシート一括処理（OCR+仕訳）
-export async function processAllUploaded(clientId: string, receiptType?: string) {
-  const params = receiptType ? `?receipt_type=${receiptType}` : "";
-  const res = await apiFetch(`/api/clients/${clientId}/process-all${params}`, {
+// 未処理レシート一括処理（OCR+仕訳）- バッチ処理
+export async function processAllUploaded(clientId: string, receiptType?: string, batchSize: number = 30) {
+  const searchParams = new URLSearchParams();
+  if (receiptType) searchParams.set("receipt_type", receiptType);
+  searchParams.set("batch_size", String(batchSize));
+  const qs = searchParams.toString();
+  const res = await apiFetch(`/api/clients/${clientId}/process-all?${qs}`, {
     method: "POST",
   });
   return res.json();

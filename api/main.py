@@ -713,9 +713,10 @@ async def upload_receipt_only(
 def process_all_uploaded(
     client_id: str,
     receipt_type: str | None = None,
+    batch_size: int = 30,
     authorization: str = Header(...),
 ):
-    """未処理（uploaded）のレシートを一括OCR→仕訳判定"""
+    """未処理（uploaded）のレシートをバッチでOCR→仕訳判定"""
     uid = verify_token(authorization)
     office_id = get_office_id(uid)
 
@@ -732,8 +733,14 @@ def process_all_uploaded(
     if receipt_type:
         docs = [d for d in docs if (d.to_dict().get("receiptType", "receipt") == receipt_type)]
 
+    total_remaining = len(docs)
     if not docs:
-        return {"processed": 0, "results": []}
+        return {"processed": 0, "remaining": 0, "results": []}
+
+    # バッチサイズで制限
+    batch_size = max(1, min(batch_size, 100))
+    docs = docs[:batch_size]
+    print(f"[バッチ処理] {total_remaining}件中 {len(docs)}件を処理")
 
     patterns = _load_patterns(office_id, client_id)
     rules = _load_rules(office_id, client_id)
@@ -1122,7 +1129,8 @@ def process_all_uploaded(
         except Exception as e:
             print(f"[CSV] {payment} 書き込み失敗: {e}")
 
-    return {"processed": len(results), "results": results}
+    remaining_count = total_remaining - len(results)
+    return {"processed": len(results), "remaining": max(0, remaining_count), "results": results}
 
 
 def _write_csv_batch(client_name: str, receipt_date: str, payment_method: str, rows: list[dict]):

@@ -116,30 +116,26 @@ function HandwrittenPageContent() {
     setProcessing(true);
     setProcessResult(null);
     setError("");
-    processAllUploaded(clientId, "handwritten")
-      .then((result) => {
-        setProcessResult(result);
-        setProcessing(false);
-        loadPendingCount();
-      })
-      .catch(() => {});
+    let totalProcessed = 0;
+    let allResults: any[] = [];
 
-    const poll = setInterval(async () => {
-      try {
-        const data = await listReceipts(clientId);
-        const remaining = (data.receipts || []).filter(
-          (r: any) => r.status === "uploaded" && r.receiptType === "handwritten"
-        );
-        setPendingCount(remaining.length);
-        if (remaining.length === 0) {
-          clearInterval(poll);
-          setProcessing(false);
-          loadPendingCount();
-        }
-      } catch {}
-    }, 5000);
+    try {
+      while (true) {
+        const result = await processAllUploaded(clientId, "handwritten", 30);
+        totalProcessed += result.processed || 0;
+        allResults = allResults.concat(result.results || []);
+        const remaining = result.remaining ?? 0;
+        setPendingCount(remaining);
 
-    setTimeout(() => clearInterval(poll), 600000);
+        if (remaining === 0 || result.processed === 0) break;
+      }
+      setProcessResult({ processed: totalProcessed, results: allResults });
+    } catch (e: any) {
+      setError(`処理エラー: ${e.message}`);
+    } finally {
+      setProcessing(false);
+      loadPendingCount();
+    }
   };
 
   return (

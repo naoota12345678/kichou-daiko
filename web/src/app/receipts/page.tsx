@@ -101,35 +101,27 @@ function ReceiptsPageContent() {
     setProcessing(true);
     setProcessResult(null);
     setError("");
-    // サーバーにリクエストを投げて、レスポンスを待たない
-    processAllUploaded(clientId, "receipt")
-      .then((result) => {
-        setProcessResult(result);
-        setProcessing(false);
-        loadPendingCount();
-      })
-      .catch(() => {
-        // タイムアウトしても処理は続いている可能性あり
-      });
+    let totalProcessed = 0;
+    let allResults: any[] = [];
 
-    // ポーリングで進捗確認（5秒ごと）
-    const poll = setInterval(async () => {
-      try {
-        const data = await listReceipts(clientId);
-        const remaining = (data.receipts || []).filter(
-          (r: any) => r.status === "uploaded" && (r.receiptType || "receipt") === "receipt"
-        );
-        setPendingCount(remaining.length);
-        if (remaining.length === 0) {
-          clearInterval(poll);
-          setProcessing(false);
-          loadPendingCount();
-        }
-      } catch {}
-    }, 5000);
+    try {
+      // バッチループ: 残りがある限り繰り返し呼ぶ
+      while (true) {
+        const result = await processAllUploaded(clientId, "receipt", 30);
+        totalProcessed += result.processed || 0;
+        allResults = allResults.concat(result.results || []);
+        const remaining = result.remaining ?? 0;
+        setPendingCount(remaining);
 
-    // 10分でポーリング停止
-    setTimeout(() => clearInterval(poll), 600000);
+        if (remaining === 0 || result.processed === 0) break;
+      }
+      setProcessResult({ processed: totalProcessed, results: allResults });
+    } catch (e: any) {
+      setError(`処理エラー: ${e.message}`);
+    } finally {
+      setProcessing(false);
+      loadPendingCount();
+    }
   };
 
   const handleImportFromDrive = async () => {
